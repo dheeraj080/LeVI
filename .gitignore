@@ -1,0 +1,49 @@
+# Security: Never commit secrets!
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python
+venv/
+.venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# IDEs
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+/build
+/dist
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Large datasets (if any)
+data/
+
+# Docker (if you use it)
+/docker/volumes
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
