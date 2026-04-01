@@ -1,49 +1,33 @@
-# Security: Never commit secrets!
-.env
-.env.local
-.env.*.local
-*.env
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
 
-# Python
-venv/
-.venv/
-ENV/
-env/
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
 
-# Python cache
-__pycache__/
-*.py[cod]
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
 
-# IDEs
-.idea/
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
 .vscode/
-
-# Logs
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Build
-/build
-/dist
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-
-# Large datasets (if any)
-data/
-
-# Docker (if you use it)
-/docker/volumes
-
-# Temporary files
-*.tmp
-*.swp
-*.swo
