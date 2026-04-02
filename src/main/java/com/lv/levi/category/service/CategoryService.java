@@ -1,14 +1,13 @@
 package com.lv.levi.category.service;
 
 import com.lv.levi.auth.entity.User;
-import com.lv.levi.category.dto.CategoryDto;
+import com.lv.levi.category.dto.CategoryDTO;
 import com.lv.levi.category.entity.Category;
 import com.lv.levi.category.repository.CategoryRepository;
 import jakarta.persistence.EntityNotFoundException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import com.lv.levi.category.entity.CategoryType;
 
 import java.util.List;
 import java.util.UUID;
@@ -21,71 +20,57 @@ public class CategoryService {
     private final CategoryRepository categoryRepository;
 
     @Transactional(readOnly = true)
-    public List<CategoryDto> getAllCategoriesForUser(UUID userId) {
-        return categoryRepository.findByUserIdAndDeletedFalse(userId)
+    public List<CategoryDTO> getAllCategoriesForUser(User user) {
+        return categoryRepository.findByUserAndDeletedFalse(user)
                 .stream()
                 .map(this::mapToDto)
                 .collect(Collectors.toList());
     }
 
     @Transactional
-    public CategoryDto createCategory(CategoryDto dto, User user) {
-        // Prevent duplicate names for the same user
-        if (categoryRepository.existsByNameAndUserIdAndDeletedFalse(dto.getName(), user.getId())) {
-            throw new IllegalStateException("Category with name '" + dto.getName() + "' already exists.");
+    public CategoryDTO createCategory(CategoryDTO dto, User user) {
+        if (categoryRepository.existsByNameAndUserAndDeletedFalse(dto.getName(), user)) {
+            throw new IllegalStateException("Category '" + dto.getName() + "' already exists.");
         }
 
-        if (dto.getType() == null) {
-            throw new IllegalArgumentException("Category type must be either CREDIT or DEBIT");
-        }
+        Category category = Category.builder()
+                .name(dto.getName())
+                .icon(dto.getIcon())
+                .type(dto.getType())
+                .user(user)
+                .deleted(false)
+                .build();
 
-        Category category = toEntity(dto, user);
-        Category savedCategory = categoryRepository.save(category);
-        return mapToDto(savedCategory);
-    }
-
-    @Transactional
-    public CategoryDto updateCategory(UUID categoryId, CategoryDto dto, UUID userId) {
-        // Security check: Find only if it belongs to the user and isn't deleted
-        Category category = categoryRepository.findByUserIdAndIdAndDeletedFalse(userId, categoryId)
-                .orElseThrow(() -> new EntityNotFoundException("Category not found or access denied"));
-
-        // Update fields
-        category.setName(dto.getName());
-        category.setIcon(dto.getIcon());
-        category.setType(dto.getType());
-
-        // Save is implicit due to @Transactional dirty checking, but explicit save is fine too
         return mapToDto(categoryRepository.save(category));
     }
 
     @Transactional
-    public void deleteCategory(UUID categoryId, UUID userId) {
-        Category category = categoryRepository.findByUserIdAndIdAndDeletedFalse(userId, categoryId)
+    public CategoryDTO updateCategory(UUID id, CategoryDTO dto, User user) {
+        Category category = categoryRepository.findByIdAndUserAndDeletedFalse(id, user)
+                .orElseThrow(() -> new EntityNotFoundException("Category not found or access denied"));
+
+        category.setName(dto.getName());
+        category.setIcon(dto.getIcon());
+        category.setType(dto.getType());
+
+        return mapToDto(categoryRepository.save(category));
+    }
+
+    @Transactional
+    public void deleteCategory(UUID id, User user) {
+        Category category = categoryRepository.findByIdAndUserAndDeletedFalse(id, user)
                 .orElseThrow(() -> new EntityNotFoundException("Category not found or access denied"));
 
         category.setDeleted(true);
         categoryRepository.save(category);
     }
 
-
-    public Category toEntity(CategoryDto categoryDto, User user) {
-        return Category.builder()
-                .name(categoryDto.getName())
-                .icon(categoryDto.getIcon())
-                .user(user)
-                .type(categoryDto.getType())
-                .deleted(false) // Ensure new categories aren't born "deleted"
-                .build();
-    }
-
-    private CategoryDto mapToDto(Category entity) {
-        return CategoryDto.builder()
+    private CategoryDTO mapToDto(Category entity) {
+        return CategoryDTO.builder()
                 .id(entity.getId())
-                .profileId(entity.getUser().getId())
                 .name(entity.getName())
                 .icon(entity.getIcon())
-                .type(entity.getType()) // Entity returns CategoryType -> DTO Builder expects CategoryType
+                .type(entity.getType())
                 .createdAt(entity.getCreatedAt())
                 .updatedAt(entity.getUpdatedAt())
                 .build();

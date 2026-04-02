@@ -1,5 +1,6 @@
 package com.lv.levi.category.repository;
 
+import com.lv.levi.auth.entity.User;
 import com.lv.levi.category.entity.Category;
 import com.lv.levi.category.entity.CategoryType;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -12,12 +13,18 @@ import java.util.UUID;
 @Repository
 public interface CategoryRepository extends JpaRepository<Category, UUID> {
 
-    List<Category> findByUserIdAndDeletedFalse(UUID userId);
+    // 1. Use the 'User' object directly - much safer
+    List<Category> findByUserAndDeletedFalse(User user);
 
-    Optional<Category> findByUserIdAndIdAndDeletedFalse(UUID userId, UUID id);
+    // 2. Security check: does this ID belong to this User?
+    Optional<Category> findByIdAndUserAndDeletedFalse(UUID id, User user);
 
-    boolean existsByNameAndUserIdAndDeletedFalse(String name, UUID userId);
+    // 3. Unique check per user
+    boolean existsByNameAndUserAndDeletedFalse(String name, User user);
 
-    // FIX: Changed 'ProfileUserId' to 'UserId' to match your entity field 'user'
-    List<Category> findByUserIdAndTypeAndDeletedFalse(UUID userId, CategoryType type);
+    // 4. Filter by type (Income/Expense) for a specific user
+    List<Category> findByUserAndTypeAndDeletedFalse(User user, CategoryType type);
+
+    // This is the one we added for the Transaction security check
+    Optional<Category> findByIdAndUser(UUID id, User user);
 }
