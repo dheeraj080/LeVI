@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.modulith.core.ApplicationModules;
 import org.springframework.modulith.docs.Documenter;
 
-class ModularityTests {
+class ModularityTest {
 
     // This scans your package structure starting from LeViApplication
     ApplicationModules modules = ApplicationModules.of(LeViApplication.class);

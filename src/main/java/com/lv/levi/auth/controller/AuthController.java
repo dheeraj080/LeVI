@@ -12,12 +12,14 @@ import com.lv.levi.auth.repository.UserRepository;
 import com.lv.levi.auth.security.CookieService;
 import com.lv.levi.auth.security.JwtService;
 import com.lv.levi.auth.service.AuthService;
+import com.lv.levi.auth.service.ResetPasswordService;
 import com.lv.levi.auth.service.UserService;
 import io.jsonwebtoken.JwtException;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.modelmapper.ModelMapper;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -33,12 +35,14 @@ import java.lang.reflect.Array;
 import java.net.URI;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/auth")
 @RequiredArgsConstructor
+@Slf4j
 public class AuthController {
 
     private final AuthService authService;
@@ -49,6 +53,7 @@ public class AuthController {
     private final RefreshTokenRepository refreshTokenRepository;
     private final CookieService cookieService;
     private final UserService userService;
+    private final ResetPasswordService resetPasswordService;
 
     @PostMapping("/login")
     public ResponseEntity<TokenResponse> login(@RequestBody LoginRequest loginRequest, HttpServletResponse response) {
@@ -234,6 +239,29 @@ public class AuthController {
             return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED)
                     .body("Activation failed. Link may be invalid or expired.");
         }
+    }
+
+
+    @PostMapping("/forgot-password")
+    public ResponseEntity<?> forgotPassword(@RequestBody Map<String, String> request) {
+        String email = request.get("email");
+        try {
+            resetPasswordService.sendResetCode(email);
+        } catch (Exception e) {
+            log.error("Reset Code Failure: ", e);
+        }
+        return ResponseEntity.ok(Map.of("message", "If an account exists, a 6-digit code has been sent."));
+    }
+
+    @PostMapping("/reset-password")
+    public ResponseEntity<?> resetPassword(@RequestBody Map<String, String> request) {
+        String email = request.get("email");
+        String code = request.get("code");
+        String newPassword = request.get("newPassword");
+
+        resetPasswordService.resetPassword(email, code, newPassword);
+
+        return ResponseEntity.ok(Map.of("message", "Password has been updated successfully"));
     }
 
 
