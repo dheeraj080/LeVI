@@ -17,7 +17,7 @@ public class EmailServiceImpl implements EmailService {
     // Final ensures @RequiredArgsConstructor injects this via constructor
     private final JavaMailSender mailSender;
 
-    @Value("${spring.mail.username}")
+    @Value("${spring.mail.properties.mail.smtp.from}")
     private String fromEmail;
 
     @Override
