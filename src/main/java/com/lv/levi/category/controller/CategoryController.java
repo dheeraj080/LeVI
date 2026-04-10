@@ -1,13 +1,15 @@
 package com.lv.levi.category.controller;
 
-import com.lv.levi.auth.entity.User;
+import com.lv.levi.auth.UserPrincipal;
 import com.lv.levi.category.dto.CategoryDTO;
 import com.lv.levi.category.service.CategoryService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -25,17 +27,15 @@ public class CategoryController {
         return ResponseEntity.ok(categoryService.getAllCategoriesForUser(userId));
     }
 
+    // Remove: import com.lv.levi.auth.entity.User;
+
     @PostMapping
     public ResponseEntity<CategoryDTO> createCategory(
             @Valid @RequestBody CategoryDTO dto,
-            @AuthenticationPrincipal com.lv.levi.auth.entity.User user) { // Accept full User object
+            @AuthenticationPrincipal UserPrincipal principal) { // Inject the Record
 
-        if (user == null) {
-            return new ResponseEntity<>(HttpStatus.UNAUTHORIZED);
-        }
-
-        // Extract the ID here
-        return new ResponseEntity<>(categoryService.createCategory(dto, user.getId()), HttpStatus.CREATED);
+        // principal.id() gives you the UUID without needing the User entity
+        return new ResponseEntity<>(categoryService.createCategory(dto, principal.id()), HttpStatus.CREATED);
     }
 
     @PutMapping("/{id}")

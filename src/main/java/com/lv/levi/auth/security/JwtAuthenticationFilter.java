@@ -1,5 +1,6 @@
 package com.lv.levi.auth.security;
 
+import com.lv.levi.auth.UserPrincipal;
 import com.lv.levi.auth.repository.UserRepository;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
@@ -58,11 +59,17 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             if (SecurityContextHolder.getContext().getAuthentication() == null) {
                 userRepository.findById(UUID.fromString(userId)).ifPresent(user -> {
                     if (user.isEnabled() && user.isAccountNonLocked()) {
+
+                        // NEW: Create the public principal instead of passing the entity
+                        UserPrincipal principal = new UserPrincipal(user.getId(), user.getEmail());
+
                         UsernamePasswordAuthenticationToken auth =
                                 new UsernamePasswordAuthenticationToken(
-                                        user, null, user.getAuthorities());
-                        auth.setDetails(new WebAuthenticationDetailsSource()
-                                .buildDetails(request));
+                                        principal, // Use the Record here
+                                        null,
+                                        user.getAuthorities());
+
+                        auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                         SecurityContextHolder.getContext().setAuthentication(auth);
                     }
                 });
