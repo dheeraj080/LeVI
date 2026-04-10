@@ -3,6 +3,7 @@ package com.lv.levi.transaction.service;
 // 1. ALL internal imports from other modules REMOVED
 import com.lv.levi.category.CategoryInternalAPI;
 import com.lv.levi.transaction.dto.TransactionDTO;
+import com.lv.levi.transaction.dto.TransactionSummaryDTO;
 import com.lv.levi.transaction.entity.Transaction;
 import com.lv.levi.transaction.entity.TransactionType;
 import com.lv.levi.transaction.repository.TransactionRepository;
@@ -47,6 +48,21 @@ public class TransactionService {
     public BigDecimal getTotalExpense(UUID userId) {
         BigDecimal total = transactionRepository.sumTotalByType(userId, TransactionType.DEBIT);
         return total != null ? total : BigDecimal.ZERO;
+    }
+
+    public BigDecimal getTotalIncome(UUID userId) {
+        BigDecimal total = transactionRepository.sumTotalByType(userId, TransactionType.CREDIT);
+        return total != null ? total : BigDecimal.ZERO;
+    }
+
+    public TransactionSummaryDTO getTransactionSummary(UUID userId) {
+        BigDecimal income = getTotalIncome(userId);
+        BigDecimal expense = getTotalExpense(userId);
+        return TransactionSummaryDTO.builder()
+                .totalIncome(income)
+                .totalExpense(expense)
+                .totalBalance(income.subtract(expense))
+                .build();
     }
 
     public BigDecimal getExpenseByCategory(UUID userId, UUID categoryId) {

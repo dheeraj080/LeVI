@@ -7,9 +7,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -23,8 +21,8 @@ public class CategoryController {
     private final CategoryService categoryService;
 
     @GetMapping
-    public ResponseEntity<List<CategoryDTO>> getCategories(@AuthenticationPrincipal UUID userId) {
-        return ResponseEntity.ok(categoryService.getAllCategoriesForUser(userId));
+    public ResponseEntity<List<CategoryDTO>> getCategories(@AuthenticationPrincipal UserPrincipal principal) {
+        return ResponseEntity.ok(categoryService.getAllCategoriesForUser(principal.id()));
     }
 
     // Remove: import com.lv.levi.auth.entity.User;
@@ -42,15 +40,15 @@ public class CategoryController {
     public ResponseEntity<CategoryDTO> updateCategory(
             @PathVariable UUID id,
             @Valid @RequestBody CategoryDTO dto,
-            @AuthenticationPrincipal UUID userId) {
-        return ResponseEntity.ok(categoryService.updateCategory(id, dto, userId));
+            @AuthenticationPrincipal UserPrincipal principal) {
+        return ResponseEntity.ok(categoryService.updateCategory(id, dto, principal.id()));
     }
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> deleteCategory(
             @PathVariable UUID id,
-            @AuthenticationPrincipal UUID userId) {
-        categoryService.deleteCategory(id, userId);
+            @AuthenticationPrincipal UserPrincipal principal) {
+        categoryService.deleteCategory(id, principal.id());
         return ResponseEntity.noContent().build();
     }
 }
