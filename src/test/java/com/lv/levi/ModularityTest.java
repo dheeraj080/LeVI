@@ -18,8 +18,9 @@ class ModularityTest {
 
     @Test
     void writeDocumentation() {
-        // This automatically generates PlantUML diagrams of your architecture
-        // Check target/modulith-docs/ after running this!
-        new Documenter(modules).writeModulesAsPlantUml();
+        new Documenter(modules)
+                .writeModulesAsPlantUml()
+                .writeIndividualModulesAsPlantUml()
+                .writeModuleCanvases();
     }
 }

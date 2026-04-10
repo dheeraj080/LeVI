@@ -35,13 +35,8 @@ public class Category {
     @Builder.Default
     private Instant updatedAt = Instant.now();
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(
-            name = "profile_user_id",      // Name in the 'categories' table
-            referencedColumnName = "user_id", // Name in the 'users' table
-            nullable = false
-    )
-    private User user;
+    @Column(name = "user_id", nullable = false)
+    private UUID userId;
 
     @Builder.Default
     private boolean deleted = false;

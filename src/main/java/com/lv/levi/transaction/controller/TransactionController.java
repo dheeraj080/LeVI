@@ -26,32 +26,32 @@ public class TransactionController {
     @PostMapping
     public ResponseEntity<TransactionDTO> create(
             @Valid @RequestBody TransactionDTO dto,
-            @AuthenticationPrincipal User user) {
-        return new ResponseEntity<>(transactionService.createTransaction(dto, user), HttpStatus.CREATED);
+            @AuthenticationPrincipal UUID userId) {
+        return new ResponseEntity<>(transactionService.createTransaction(dto, userId), HttpStatus.CREATED);
     }
 
     @GetMapping
-    public ResponseEntity<List<TransactionDTO>> getAll(@AuthenticationPrincipal User user) {
-        return ResponseEntity.ok(transactionService.getUserTransactions(user));
+    public ResponseEntity<List<TransactionDTO>> getAll(@AuthenticationPrincipal UUID userId) {
+        return ResponseEntity.ok(transactionService.getUserTransactions(userId));
     }
 
     @GetMapping("/range")
     public ResponseEntity<List<TransactionDTO>> getByRange(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate start,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate end,
-            @AuthenticationPrincipal User user) {
-        return ResponseEntity.ok(transactionService.getTransactionsByPeriod(user, start, end));
+            @AuthenticationPrincipal UUID userId) {
+        return ResponseEntity.ok(transactionService.getTransactionsByPeriod(userId, start, end));
     }
 
     @GetMapping("/total-expense")
-    public ResponseEntity<BigDecimal> getTotalExpense(@AuthenticationPrincipal User user) {
-        return ResponseEntity.ok(transactionService.getTotalExpense(user));
+    public ResponseEntity<BigDecimal> getTotalExpense(@AuthenticationPrincipal UUID userId) {
+        return ResponseEntity.ok(transactionService.getTotalExpense(userId));
     }
 
     @GetMapping("/category/{categoryId}/expense")
     public ResponseEntity<BigDecimal> getCategoryExpense(
             @PathVariable UUID categoryId,
-            @AuthenticationPrincipal User user) {
-        return ResponseEntity.ok(transactionService.getExpenseByCategory(user, categoryId));
+            @AuthenticationPrincipal UUID userId) {
+        return ResponseEntity.ok(transactionService.getExpenseByCategory(userId, categoryId));
     }
 }

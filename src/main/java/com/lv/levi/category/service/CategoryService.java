@@ -1,6 +1,5 @@
 package com.lv.levi.category.service;
 
-import com.lv.levi.auth.entity.User;
 import com.lv.levi.category.dto.CategoryDTO;
 import com.lv.levi.category.entity.Category;
 import com.lv.levi.category.repository.CategoryRepository;
@@ -20,16 +19,18 @@ public class CategoryService {
     private final CategoryRepository categoryRepository;
 
     @Transactional(readOnly = true)
-    public List<CategoryDTO> getAllCategoriesForUser(User user) {
-        return categoryRepository.findByUserAndDeletedFalse(user)
+    public List<CategoryDTO> getAllCategoriesForUser(UUID userId) {
+        // FIX: Use userId and the updated repository method name
+        return categoryRepository.findByUserIdAndDeletedFalse(userId)
                 .stream()
                 .map(this::mapToDto)
                 .collect(Collectors.toList());
     }
 
     @Transactional
-    public CategoryDTO createCategory(CategoryDTO dto, User user) {
-        if (categoryRepository.existsByNameAndUserAndDeletedFalse(dto.getName(), user)) {
+    public CategoryDTO createCategory(CategoryDTO dto, UUID userId) {
+        // FIX: Use userId
+        if (categoryRepository.existsByNameAndUserIdAndDeletedFalse(dto.getName(), userId)) {
             throw new IllegalStateException("Category '" + dto.getName() + "' already exists.");
         }
 
@@ -37,7 +38,7 @@ public class CategoryService {
                 .name(dto.getName())
                 .icon(dto.getIcon())
                 .type(dto.getType())
-                .user(user)
+                .userId(userId) // FIX: Store the UUID directly
                 .deleted(false)
                 .build();
 
@@ -45,8 +46,9 @@ public class CategoryService {
     }
 
     @Transactional
-    public CategoryDTO updateCategory(UUID id, CategoryDTO dto, User user) {
-        Category category = categoryRepository.findByIdAndUserAndDeletedFalse(id, user)
+    public CategoryDTO updateCategory(UUID id, CategoryDTO dto, UUID userId) {
+        // FIX: Use userId
+        Category category = categoryRepository.findByIdAndUserIdAndDeletedFalse(id, userId)
                 .orElseThrow(() -> new EntityNotFoundException("Category not found or access denied"));
 
         category.setName(dto.getName());
@@ -57,8 +59,9 @@ public class CategoryService {
     }
 
     @Transactional
-    public void deleteCategory(UUID id, User user) {
-        Category category = categoryRepository.findByIdAndUserAndDeletedFalse(id, user)
+    public void deleteCategory(UUID id, UUID userId) {
+        // FIX: Use userId
+        Category category = categoryRepository.findByIdAndUserIdAndDeletedFalse(id, userId)
                 .orElseThrow(() -> new EntityNotFoundException("Category not found or access denied"));
 
         category.setDeleted(true);

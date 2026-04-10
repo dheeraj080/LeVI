@@ -13,18 +13,15 @@ import java.util.UUID;
 @Repository
 public interface CategoryRepository extends JpaRepository<Category, UUID> {
 
-    // 1. Use the 'User' object directly - much safer
-    List<Category> findByUserAndDeletedFalse(User user);
+    // Change parameter from 'UUID userId' to 'UUID userId'
+    boolean existsByIdAndUserId(UUID id, UUID userId);
 
-    // 2. Security check: does this ID belong to this User?
-    Optional<Category> findByIdAndUserAndDeletedFalse(UUID id, User user);
+    // Update these to use UUID as well to satisfy Modulith
+    List<Category> findByUserIdAndDeletedFalse(UUID userId);
 
-    // 3. Unique check per user
-    boolean existsByNameAndUserAndDeletedFalse(String name, User user);
+    Optional<Category> findByIdAndUserIdAndDeletedFalse(UUID id, UUID userId);
 
-    // 4. Filter by type (Income/Expense) for a specific user
-    List<Category> findByUserAndTypeAndDeletedFalse(User user, CategoryType type);
+    boolean existsByNameAndUserIdAndDeletedFalse(String name, UUID userId);
 
-    // This is the one we added for the Transaction security check
-    Optional<Category> findByIdAndUser(UUID id, User user);
+    List<Category> findByUserIdAndTypeAndDeletedFalse(UUID userId, CategoryType type);
 }

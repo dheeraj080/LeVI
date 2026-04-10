@@ -1,7 +1,5 @@
 package com.lv.levi.transaction.entity;
 
-import com.lv.levi.auth.entity.User;
-import com.lv.levi.category.entity.Category;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -17,7 +15,7 @@ import java.util.UUID;
 @Entity
 @Builder
 @Table(name = "transactions")
-public class Transaction { // Renamed from "Transactions" (Standard practice is singular)
+public class Transaction {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
@@ -29,6 +27,7 @@ public class Transaction { // Renamed from "Transactions" (Standard practice is 
 
     private String description;
 
+    @Column(name = "transaction_date")
     private LocalDate transactionDate;
 
     @Column(nullable = false)
@@ -44,28 +43,23 @@ public class Transaction { // Renamed from "Transactions" (Standard practice is 
     @Builder.Default
     private Instant updatedAt = Instant.now();
 
-    // FIXED: Points to Category Entity, not the Enum
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(
-            name = "category_id",
-            referencedColumnName = "category_id", // Points to Category PK
-            nullable = false
-    )
-    private Category category;
+    // FIX 1: Use UUID to decouple from Category module internals
+    @Column(name = "category_id", nullable = false)
+    private UUID categoryId;
 
-    // FIXED: Changed name to 'user_id' to avoid conflict with 'transaction_id'
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(
-            name = "user_id",
-            referencedColumnName = "user_id",
-            nullable = false
-    )
-    private User user;
+    // FIX 2: Use UUID to decouple from Auth module internals
+    // Note: Removed @ManyToOne because we are only storing the ID
+    @Column(name = "user_id", nullable = false)
+    private UUID userId;
 
-    @PrePersist // Added annotation
+    @PrePersist
     public void prePersist() {
         if (this.transactionDate == null) {
             this.transactionDate = LocalDate.now();
         }
+        if (this.createdAt == null) {
+            this.createdAt = Instant.now();
+        }
+        this.updatedAt = Instant.now();
     }
 }

@@ -21,30 +21,36 @@ public class CategoryController {
     private final CategoryService categoryService;
 
     @GetMapping
-    public ResponseEntity<List<CategoryDTO>> getCategories(@AuthenticationPrincipal User user) {
-        return ResponseEntity.ok(categoryService.getAllCategoriesForUser(user));
+    public ResponseEntity<List<CategoryDTO>> getCategories(@AuthenticationPrincipal UUID userId) {
+        return ResponseEntity.ok(categoryService.getAllCategoriesForUser(userId));
     }
 
     @PostMapping
     public ResponseEntity<CategoryDTO> createCategory(
             @Valid @RequestBody CategoryDTO dto,
-            @AuthenticationPrincipal User user) {
-        return new ResponseEntity<>(categoryService.createCategory(dto, user), HttpStatus.CREATED);
+            @AuthenticationPrincipal com.lv.levi.auth.entity.User user) { // Pass the User object
+
+        if (user == null) {
+            return new ResponseEntity<>(HttpStatus.UNAUTHORIZED);
+        }
+
+        // Pass user.getId() to the service
+        return new ResponseEntity<>(categoryService.createCategory(dto, user.getId()), HttpStatus.CREATED);
     }
 
     @PutMapping("/{id}")
     public ResponseEntity<CategoryDTO> updateCategory(
             @PathVariable UUID id,
             @Valid @RequestBody CategoryDTO dto,
-            @AuthenticationPrincipal User user) {
-        return ResponseEntity.ok(categoryService.updateCategory(id, dto, user));
+            @AuthenticationPrincipal UUID userId) {
+        return ResponseEntity.ok(categoryService.updateCategory(id, dto, userId));
     }
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> deleteCategory(
             @PathVariable UUID id,
-            @AuthenticationPrincipal User user) {
-        categoryService.deleteCategory(id, user);
+            @AuthenticationPrincipal UUID userId) {
+        categoryService.deleteCategory(id, userId);
         return ResponseEntity.noContent().build();
     }
 }
