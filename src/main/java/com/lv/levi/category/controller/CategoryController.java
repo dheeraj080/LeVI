@@ -28,13 +28,13 @@ public class CategoryController {
     @PostMapping
     public ResponseEntity<CategoryDTO> createCategory(
             @Valid @RequestBody CategoryDTO dto,
-            @AuthenticationPrincipal com.lv.levi.auth.entity.User user) { // Pass the User object
+            @AuthenticationPrincipal com.lv.levi.auth.entity.User user) { // Accept full User object
 
         if (user == null) {
             return new ResponseEntity<>(HttpStatus.UNAUTHORIZED);
         }
 
-        // Pass user.getId() to the service
+        // Extract the ID here
         return new ResponseEntity<>(categoryService.createCategory(dto, user.getId()), HttpStatus.CREATED);
     }
 
