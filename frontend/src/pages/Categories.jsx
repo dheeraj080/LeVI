@@ -9,6 +9,7 @@ const Categories = () => {
   const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [newCat, setNewCat] = useState({ name: '', icon: '#6366f1', type: 'DEBIT' });
+  const [editingCat, setEditingCat] = useState(null);
 
   useEffect(() => {
     fetchCategories();
@@ -34,6 +35,27 @@ const Categories = () => {
     } catch (err) {
       console.error(err);
     }
+  };
+
+  const startEdit = (cat) => {
+    setEditingCat(cat);
+    setNewCat({ name: cat.name, icon: cat.icon || '#6366f1', type: cat.type || 'DEBIT' });
+  };
+
+  const handleUpdate = async () => {
+    try {
+      const res = await api.put(`/categories/${editingCat.id}`, newCat);
+      setCategories(categories.map(c => c.id === editingCat.id ? res.data : c));
+      setEditingCat(null);
+      setNewCat({ name: '', icon: '#6366f1', type: 'DEBIT' });
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditingCat(null);
+    setNewCat({ name: '', icon: '#6366f1', type: 'DEBIT' });
   };
 
   const handleDelete = async (id) => {
@@ -63,10 +85,13 @@ const Categories = () => {
                     <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>0 Transactions</p>
                   </div>
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <button style={{ color: 'var(--text-secondary)', background: 'transparent' }}><Edit2 size={16} /></button>
+                    <button 
+                      onClick={() => startEdit(cat)}
+                      style={{ color: 'var(--text-secondary)', background: 'transparent', cursor: 'pointer', border: 'none' }}
+                    ><Edit2 size={16} /></button>
                     <button 
                       onClick={() => handleDelete(cat.id)}
-                      style={{ color: 'var(--danger)', background: 'transparent' }}
+                      style={{ color: 'var(--danger)', background: 'transparent', cursor: 'pointer', border: 'none' }}
                     ><Trash2 size={16} /></button>
                   </div>
                 </div>
@@ -76,7 +101,7 @@ const Categories = () => {
         </div>
 
         <div>
-          <Card title="Add New Category">
+          <Card title={editingCat ? "Edit Category" : "Add New Category"}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <Input 
                 label="Category Name" 
@@ -88,19 +113,19 @@ const Categories = () => {
                 <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Type</label>
                 <select 
                   style={{ 
-                    background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '12px', color: 'white', outline: 'none', appearance: 'none', WebkitAppearance: 'none'
+                    background: 'var(--glass-bg)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '12px', color: 'var(--text-primary)', outline: 'none', appearance: 'none', WebkitAppearance: 'none'
                   }}
                   value={newCat.type}
                   onChange={(e) => setNewCat({ ...newCat, type: e.target.value })}
                 >
-                  <option value="DEBIT" style={{ background: '#111' }}>Expense</option>
-                  <option value="CREDIT" style={{ background: '#111' }}>Income</option>
+                    <option value="DEBIT" style={{ background: 'var(--panel-color)', color: 'var(--text-primary)' }}>Expense</option>
+                    <option value="CREDIT" style={{ background: 'var(--panel-color)', color: 'var(--text-primary)' }}>Income</option>
                 </select>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Label Color</label>
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                  {['#6366f1', '#10b981', '#ef4444', '#f59e0b', '#ec4899', '#8b5cf6'].map(icon => (
+                  {['var(--accent-color)', 'var(--success)', 'var(--accent-pink)', 'var(--accent-orange)', 'var(--accent-purple)', 'var(--warning)'].map(icon => (
                     <button 
                       key={icon}
                       onClick={() => setNewCat({ ...newCat, icon })}
@@ -127,9 +152,16 @@ const Categories = () => {
                   </div>
                 </div>
               </div>
-              <Button style={{ width: '100%' }} onClick={handleCreate}>
-                <Plus size={18} /> Create Category
-              </Button>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                {editingCat && (
+                  <Button variant="secondary" style={{ flex: 1 }} onClick={cancelEdit}>
+                    Cancel
+                  </Button>
+                )}
+                <Button style={{ flex: 1 }} onClick={editingCat ? handleUpdate : handleCreate}>
+                  <Plus size={18} /> {editingCat ? 'Update Category' : 'Create Category'}
+                </Button>
+              </div>
             </div>
           </Card>
         </div>

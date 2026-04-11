@@ -1,10 +1,20 @@
 import React from 'react';
 
-export const Card = ({ children, title, action, style, className = "" }) => (
-  <div className={`glass ${className}`} style={{ padding: '24px', ...style }}>
+export const Card = ({ children, title, action, style, noPadding = false, className = "" }) => (
+  <div 
+    className={className} 
+    style={{ 
+      background: 'var(--panel-color)',
+      border: '1px solid var(--border-color)',
+      borderRadius: '12px',
+      padding: noPadding ? '0' : '24px',
+      boxShadow: 'var(--shadow-lg)',
+      ...style 
+    }}
+  >
     {(title || action) && (
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-        {title && <h3 style={{ fontSize: '1.1rem', fontWeight: '600', letterSpacing: '-0.2px' }}>{title}</h3>}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: noPadding ? '0' : '20px', padding: noPadding ? '24px 24px 0 24px' : '0' }}>
+        {title && <h3 style={{ fontSize: '1.05rem', fontWeight: '500', letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>{title}</h3>}
         {action}
       </div>
     )}

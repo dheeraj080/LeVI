@@ -91,6 +91,34 @@ public class TransactionService {
         return convertToDto(saved);
     }
 
+    @Transactional
+    public TransactionDTO updateTransaction(UUID id, TransactionDTO dto, UUID userId) {
+        Transaction transaction = transactionRepository.findById(id)
+                .filter(t -> t.getUserId().equals(userId))
+                .orElseThrow(() -> new ResourceNotFoundException("Transaction not found or unauthorized."));
+
+        if (!categoryInternalAPI.existsByIdAndUserId(dto.getCategoryId(), userId)) {
+            throw new ResourceNotFoundException("Category not found or unauthorized.");
+        }
+
+        transaction.setTitle(dto.getTitle());
+        transaction.setDescription(dto.getDescription());
+        transaction.setAmount(dto.getAmount());
+        transaction.setType(dto.getType());
+        transaction.setTransactionDate(dto.getTransactionDate());
+        transaction.setCategoryId(dto.getCategoryId());
+
+        return convertToDto(transactionRepository.save(transaction));
+    }
+
+    @Transactional
+    public void deleteTransaction(UUID id, UUID userId) {
+        Transaction transaction = transactionRepository.findById(id)
+                .filter(t -> t.getUserId().equals(userId))
+                .orElseThrow(() -> new ResourceNotFoundException("Transaction not found or unauthorized."));
+        transactionRepository.delete(transaction);
+    }
+
     private TransactionDTO convertToDto(Transaction transaction) {
         TransactionDTO dto = modelMapper.map(transaction, TransactionDTO.class);
         

@@ -54,6 +54,22 @@ public class TransactionController {
         return ResponseEntity.ok(transactionService.getTransactionSummary(principal.id()));
     }
 
+    @PutMapping("/{id}")
+    public ResponseEntity<TransactionDTO> update(
+            @PathVariable UUID id,
+            @Valid @RequestBody TransactionDTO dto,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        return ResponseEntity.ok(transactionService.updateTransaction(id, dto, principal.id()));
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        transactionService.deleteTransaction(id, principal.id());
+        return ResponseEntity.noContent().build();
+    }
+
     @GetMapping("/category/{categoryId}/expense")
     public ResponseEntity<BigDecimal> getCategoryExpense(
             @PathVariable UUID categoryId,

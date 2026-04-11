@@ -3,13 +3,14 @@ import React from 'react';
 export const Button = ({ children, variant = 'primary', style, ...props }) => {
   const styles = {
     primary: {
-      background: 'var(--accent-color)',
-      color: 'white',
-      boxShadow: '0 4px 14px 0 var(--accent-glow)',
+      background: 'var(--text-primary)',
+      color: 'var(--sidebar-bg)',
+      boxShadow: 'var(--shadow-sm)',
+      border: '1px solid var(--text-primary)',
     },
     secondary: {
-      background: 'rgba(255, 255, 255, 0.05)',
-      color: 'white',
+      background: 'var(--glass-bg)',
+      color: 'var(--text-primary)',
       border: '1px solid var(--border-color)',
     },
     ghost: {
@@ -17,9 +18,9 @@ export const Button = ({ children, variant = 'primary', style, ...props }) => {
       color: 'var(--text-secondary)',
     },
     danger: {
-      background: 'rgba(239, 68, 68, 0.1)',
-      color: 'var(--danger)',
-      border: '1px solid rgba(239, 68, 68, 0.2)',
+      background: 'rgba(255, 69, 58, 0.1)',
+      color: 'var(--accent-pink)',
+      border: '1px solid rgba(255, 69, 58, 0.2)',
     }
   };
 
@@ -28,13 +29,16 @@ export const Button = ({ children, variant = 'primary', style, ...props }) => {
   return (
     <button
       style={{
-        padding: '10px 20px',
+        padding: '8px 16px',
         fontWeight: '500',
-        fontSize: '0.9rem',
+        fontSize: '0.85rem',
+        letterSpacing: '-0.01em',
+        borderRadius: '6px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         gap: '8px',
+        transition: 'var(--transition-smooth)',
         ...currentStyle,
         ...style
       }}
