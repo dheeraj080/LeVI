@@ -139,9 +139,10 @@ const Landing = () => {
 
           <h1 style={{ 
             fontSize: 'clamp(3.5rem, 9vw, 6.5rem)', fontWeight: '800', lineHeight: '0.95', 
-            letterSpacing: '-0.05em', marginBottom: '40px', maxWidth: '900px'
+            letterSpacing: '-0.05em', marginBottom: '40px', maxWidth: '900px',
+            color: 'var(--text-primary)'
           }}>
-            Invest in your<br /><span style={{ opacity: 0.35 }}>Financial Clarity.</span>
+            Invest in your<br /><span style={{ color: 'var(--accent-color)', opacity: 0.6 }}>Financial Clarity.</span>
           </h1>
           
           <p style={{ 
@@ -223,13 +224,13 @@ const Landing = () => {
           <div style={{ gridColumn: 'span 2' }}>
             <Card style={{ padding: '80px', display: 'flex', gap: '60px', alignItems: 'center', background: 'var(--panel-color)' }}>
                <div style={{ flex: 1 }}>
-                  <h3 style={{ fontSize: '2rem', fontWeight: '700', marginBottom: '20px' }}>Privacy is the ultimate luxury.</h3>
+                  <h3 style={{ fontSize: '2rem', fontWeight: '700', marginBottom: '20px', color: 'var(--text-primary)' }}>Privacy is the ultimate luxury.</h3>
                   <p style={{ color: 'var(--text-secondary)', lineHeight: '1.7' }}>
                     LeVI is built on a private-first architecture. We don't sell your data, we don't track your location. Your financial business stays your financial business.
                   </p>
                   <div style={{ marginTop: '40px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                      {[ 'Zero-Knowledge Encryption', 'Independently Audited', 'Multi-Factor Verification' ].map(text => (
-                       <div key={text} style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '0.9rem' }}>
+                       <div key={text} style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
                           <Check size={16} color="var(--success)" />
                           <span>{text}</span>
                        </div>

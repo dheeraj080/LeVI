@@ -8,23 +8,23 @@
 }
 
 [data-theme='dark'] {
-  --bg-color: #000000;
-  --sidebar-bg: #000000;
-  --panel-color: #0A0A0A;
+  --bg-color: #121212; /* Charcoal Black */
+  --sidebar-bg: #121212;
+  --panel-color: #1A1A1A;
   
-  --accent-color: #ffffff; /* White primary action */
+  --accent-color: #888888; /* Soft Gray Accent */
   --accent-pink: #FF453A; 
   --accent-purple: #BF5AF2; 
   --accent-orange: #FF9F0A; 
   
-  --text-primary: #f2f2f2;
-  --text-secondary: #888888;
-  --border-color: rgba(255, 255, 255, 0.08);
-  --glass-bg: rgba(255, 255, 255, 0.02);
+  --text-primary: #E0E0E0; /* Light Gray */
+  --text-secondary: #B0B0B0; /* Medium Gray */
+  --border-color: #444444; /* Dark Gray Divider */
+  --glass-bg: rgba(68, 68, 68, 0.2);
   --danger: #FF453A;
   
-  --shadow-sm: 0 2px 8px rgba(255, 255, 255, 0.1);
-  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 [data-theme='light'] {
