@@ -79,7 +79,7 @@ export const Layout = ({ children, title }) => {
         </div>
 
         <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
-          <NavItem to="/" icon={BarChart3} label="Dashboard" />
+          <NavItem to="/dashboard" icon={BarChart3} label="Dashboard" />
           <NavItem to="/transactions" icon={Repeat} label="Transactions" />
           <NavItem to="/categories" icon={Layers} label="Categories" />
           <NavItem to="/wallets" icon={Wallet} label="Wallets" />

@@ -7,6 +7,9 @@ import Categories from './pages/Categories';
 import Transactions from './pages/Transactions';
 import Profile from './pages/Profile';
 import Settings from './pages/Settings';
+import Landing from './pages/Landing';
+import Register from './pages/Register';
+import ForgotPassword from './pages/ForgotPassword';
 
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
@@ -22,8 +25,11 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/" element={<Landing />} />
         <Route 
-          path="/" 
+          path="/dashboard" 
           element={
             <ProtectedRoute>
               <Dashboard />
