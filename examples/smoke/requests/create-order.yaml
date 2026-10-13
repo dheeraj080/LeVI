@@ -1,0 +1,10 @@
+id: create-order
+name: Create order
+method: POST
+url: /orders
+headers:
+  - name: Accept
+    value: application/json
+body:
+  json: |
+    {"sku": "{{$uuid}}", "note": "{{greeting}}"}

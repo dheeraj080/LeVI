@@ -1,0 +1,21 @@
+[package]
+name = "lev-cli"
+description = "The `levi` command-line interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "levi"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+lev-core = { path = "../lev-core" }
+lev-format = { path = "../lev-format" }
+lev-http = { path = "../lev-http" }
+mimalloc = "0.1.52"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }

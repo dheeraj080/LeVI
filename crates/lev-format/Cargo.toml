@@ -1,0 +1,18 @@
+[package]
+name = "lev-format"
+description = "Levi collection format: on-disk DTOs and (de)serialization behind a DocumentFormat boundary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+lev-core = { path = "../lev-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_yaml_ng = "0.10.0"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+insta = "1.49.0"

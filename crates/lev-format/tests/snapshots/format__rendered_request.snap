@@ -1,0 +1,16 @@
+---
+source: crates/lev-format/tests/format.rs
+expression: rendered
+---
+id: corpus-request
+name: Corpus request
+method: POST
+url: /things/{{thing_id}}
+headers:
+- name: Accept
+  value: application/json
+- name: X-Trace
+  value: '{{$uuid}}'
+body:
+  json: |
+    {"id": "{{thing_id}}", "note": "{{$randomInt}}"}

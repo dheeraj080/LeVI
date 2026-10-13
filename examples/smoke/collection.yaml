@@ -1,0 +1,10 @@
+id: smoke
+name: Smoke
+baseUrl: http://127.0.0.1:8787
+vars:
+  greeting: hello
+  api_token:
+    secret: smoke_token
+auth:
+  type: bearer
+  token: "{{api_token}}"

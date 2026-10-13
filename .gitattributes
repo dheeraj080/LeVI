@@ -1,0 +1,13 @@
+# Normalize to LF in the repository: the collection format is git-native and must
+# diff cleanly across platforms.
+* text=auto eol=lf
+
+# Snapshot files must be byte-stable for testing.
+*.snap text eol=lf
+
+# Windows-only helper scripts.
+*.ps1 text eol=crlf
+
+# Compiled artifacts are never text.
+*.exe binary
+*.dll binary

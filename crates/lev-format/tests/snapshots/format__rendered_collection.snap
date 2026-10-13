@@ -1,0 +1,17 @@
+---
+source: crates/lev-format/tests/format.rs
+expression: rendered
+---
+id: corpus-basic
+name: Corpus Basic
+vars:
+  host: api.example.com
+  token:
+    secret: corpus_token
+auth:
+  type: apiKey
+  name: X-Api-Key
+  value:
+    secret: corpus_token
+  location: header
+baseUrl: https://{{host}}

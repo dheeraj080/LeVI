@@ -1,0 +1,13 @@
+id: corpus-basic
+name: Corpus Basic
+baseUrl: "https://{{host}}"
+vars:
+  host: api.example.com
+  token:
+    secret: corpus_token
+auth:
+  type: apiKey
+  name: X-Api-Key
+  value:
+    secret: corpus_token
+  location: header
