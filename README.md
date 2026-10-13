@@ -7,31 +7,38 @@ separate load-testing tool and no rewriting requests in k6 syntax: the same requ
 the same scripts, the same environment — fired once for interactive debugging, or tens
 of thousands of times per second for a load run.
 
-> **Status: Phase 0 (foundations).** The engine is being built as a standalone Rust CLI
-> first, per the build plan. `levi request` works end to end today (real HTTP, per-phase
-> timing, redacted output, secrets from the environment); `levi run` and the protocol
-> boundary land in later phases.
+> **Status: Phase 1 (protocol + interactive engine).** The engine is built as a
+> standalone Rust CLI first, per the build plan. `levi request` works end to end *through
+> the protocol boundary*, with real HTTP, per-phase timing, and secrets redacted inside
+> the engine; `levi serve --stdio` speaks the same protocol over NDJSON. Protocol v0 is
+> frozen — see [`PROTOCOL.md`](PROTOCOL.md). `levi run` and load testing land in Phase 3.
 
 ## Layout
 
 ```
 crates/
-  lev-core/     pure domain model — no I/O, no serde
-  lev-format/   collection format: on-disk DTOs + (de)serialization
-  lev-http/     the single hyper-based HTTP transport
-  lev-cli/      the `levi` binary
+  lev-core/      pure domain model — no I/O, no serde
+  lev-format/    collection format: on-disk DTOs + (de)serialization
+  lev-http/      the single hyper-based HTTP transport
+  lev-protocol/  the wire protocol: versioned DTOs + transports (cannot see lev-core)
+  lev-engine/    the facade: DTO <-> core conversions, redaction, the serve loop
+  lev-metrics/   metrics scaffold: MetricSnapshot + k6-compatible metric names
+  lev-cli/       the `levi` binary
 examples/smoke/ a runnable collection
-spec/           the public collection-format spec + conformance corpus
+spec/            the public collection-format spec + conformance corpus
 ```
 
-Three rules keep the crates honest:
+Four rules keep the crates honest:
 
 1. `lev-core` has **no I/O** and **no `serde`** — it is never serialized.
 2. `lev-format` owns the on-disk representation behind a `DocumentFormat` boundary.
-3. One HTTP path (`hyper`, never `reqwest`) so interactive and load behaviour cannot
+3. `lev-protocol` owns the wire representation and **cannot see `lev-core`**, so a
+   domain type cannot leak onto the wire.
+4. One HTTP path (`hyper`, never `reqwest`) so interactive and load behaviour cannot
    diverge.
 
-See `spec/README.md` for the on-disk format.
+See `spec/README.md` for the on-disk format and [`PROTOCOL.md`](PROTOCOL.md) for the wire
+protocol.
 
 ## Quickstart
 
@@ -43,10 +50,18 @@ pwsh scripts/dev-server.ps1 -Port 8787
 export LEVI_SECRET_smoke_token=supersecret-token      # Windows: $env:LEVI_SECRET_smoke_token = '...'
 
 cargo run -p lev-cli -- request examples/smoke/requests/get-root.yaml --show-body
+
+# Parse a collection directory and report every problem
+cargo run -p lev-cli -- validate examples/smoke
+
+# Serve the protocol over stdio (one JSON message per line; see PROTOCOL.md)
+cargo run -p lev-cli -- serve --stdio
 ```
 
-Output shows the resolved request (secrets masked), the status, a per-phase timing
-breakdown, and the redacted response.
+`levi request` sends a real `sendRequest` to an engine over the in-process transport, so
+the CLI exercises the same boundary the UI will. Output shows the resolved request
+(secrets masked), the status, a per-phase timing breakdown, and the redacted response —
+redaction happens in the engine, before anything crosses the boundary.
 
 ## Development
 

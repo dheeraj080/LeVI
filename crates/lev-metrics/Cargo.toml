@@ -1,0 +1,11 @@
+[package]
+name = "lev-metrics"
+description = "Levi metrics: run-level aggregates and the MetricSnapshot the UI consumes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]

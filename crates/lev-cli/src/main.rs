@@ -1,36 +1,47 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The `levi` command-line interface.
 //!
-//! Phase 0 surface: `levi request <file>`. Load runs (`levi run`), the protocol
-//! boundary, and the daemon land in later phases.
+//! Phase 1 surface: `request`, `serve --stdio` and `validate`. `request` runs the
+//! **real protocol path** — it sends a `SendRequest` to an engine over an in-process
+//! transport, rather than calling the transport directly. There is no shortcut here
+//! on purpose: if the protocol is wrong, the CLI breaks first.
+//!
+//! `run`, `import` and `selftest` land in later phases.
 #![forbid(unsafe_code)]
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lev_core::{prepare_request_with_seed, Collection, CoreError, MapSecretStore, Redactor};
+use lev_core::{Collection, CoreError};
+use lev_engine::{convert, in_process_client, store_from_env, Engine, EngineError};
 use lev_format::{load_collection, load_request, load_vars, FormatError, Yaml};
-use lev_http::{HttpClient, HttpError};
+use lev_protocol::{EchoDto, ErrorCode, NdjsonTransport, ResponseDto, TimingsDto};
 
 /// Use mimalloc as the global allocator: a load generator allocates constantly, and
 /// a predictable allocator keeps generator-side jitter out of the histograms.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Exit codes are a contract for CI and are documented permanently.
+// Exit codes are a contract for CI and are documented permanently (see README).
+/// Success.
+const EXIT_SUCCESS: u8 = 0;
+/// A threshold failed. Reserved: thresholds land in Phase 3.
+#[allow(dead_code)]
+const EXIT_THRESHOLD: u8 = 1;
+/// A configuration or usage error.
 const EXIT_CONFIG: u8 = 2;
+/// The engine failed to do its job.
 const EXIT_ENGINE: u8 = 3;
-
-/// Environment variables named `LEVI_SECRET_<NAME>` seed the secret store until the
-/// OS keychain lands in Phase 1.
-const SECRET_ENV_PREFIX: &str = "LEVI_SECRET_";
+/// Aborted by the user or by `abortOn`. Reserved: load runs land in Phase 3.
+#[allow(dead_code)]
+const EXIT_ABORTED: u8 = 4;
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match run(&args).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(EXIT_SUCCESS),
         Err(fail) => {
             eprintln!("error: {}", fail.message);
             ExitCode::from(fail.code)
@@ -38,27 +49,42 @@ async fn main() -> ExitCode {
     }
 }
 
-fn run_usage() -> String {
+fn usage() -> String {
     format!(
         "levi {version} — the request you already wrote is the load test
 
 USAGE:
-    levi request <file> [OPTIONS]
+    levi <COMMAND> [OPTIONS]
 
-OPTIONS:
+COMMANDS:
+    request <file>       Send one request and print the response
+    serve --stdio        Serve the protocol over stdin/stdout (NDJSON)
+    validate <dir>       Parse a collection directory and report errors
+    help                 Print this help
+    version              Print the version
+
+REQUEST OPTIONS:
     --collection <dir>   Collection directory (default: the request file's folder)
     --env <name>         Load environments/<name>.yaml
     --seed <n>           Seed for dynamic functions (uuid, timestamp, randomInt)
     --show-body          Print the (redacted) response body
     --max-body <bytes>   Truncate the printed body [default: 4096]
-    -h, --help           Print help
 
-Secrets are read from environment variables named LEVI_SECRET_<NAME>.
+EXIT CODES:
+    0  success
+    1  threshold failed
+    2  configuration or usage error
+    3  engine error
+    4  aborted
+
+Secrets are read from environment variables named LEVI_SECRET_<NAME>. The engine
+redacts secret values before anything is printed or crosses the protocol.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
 }
 
+/// A failure with the exit code it maps to.
 struct Fail {
     message: String,
     code: u8,
@@ -92,31 +118,38 @@ impl From<CoreError> for Fail {
     }
 }
 
-fn map_http(error: HttpError) -> Fail {
-    let is_config = matches!(
-        &error,
-        HttpError::InvalidUrl(_)
-            | HttpError::InvalidHeader(_)
-            | HttpError::InvalidMethod(_)
-            | HttpError::Tls(_)
-    );
-    let message = error.to_string();
-    if is_config {
-        Fail::config(message)
-    } else {
-        Fail::engine(message)
+impl From<EngineError> for Fail {
+    fn from(error: EngineError) -> Self {
+        Self {
+            message: error.to_string(),
+            code: exit_code_for(error.code()),
+        }
+    }
+}
+
+/// Map a stable wire error code onto the CLI's exit-code contract.
+fn exit_code_for(code: ErrorCode) -> u8 {
+    match code {
+        ErrorCode::Config | ErrorCode::BadMessage | ErrorCode::ProtocolVersionMismatch => {
+            EXIT_CONFIG
+        }
+        ErrorCode::Unsupported => EXIT_CONFIG,
+        ErrorCode::Engine | ErrorCode::Internal => EXIT_ENGINE,
     }
 }
 
 async fn run(args: &[String]) -> Result<(), Fail> {
     let Some(command) = args.first() else {
-        print!("{}", run_usage());
+        print!("{}", usage());
         return Err(Fail::config("no command given"));
     };
+
     match command.as_str() {
         "request" => run_request(&args[1..]).await,
+        "serve" => run_serve(&args[1..]).await,
+        "validate" => run_validate(&args[1..]),
         "help" | "--help" | "-h" => {
-            print!("{}", run_usage());
+            print!("{}", usage());
             Ok(())
         }
         "version" | "--version" | "-V" => {
@@ -124,11 +157,13 @@ async fn run(args: &[String]) -> Result<(), Fail> {
             Ok(())
         }
         other => {
-            print!("{}", run_usage());
+            print!("{}", usage());
             Err(Fail::config(format!("unknown command `{other}`")))
         }
     }
 }
+
+// ---- request ----
 
 async fn run_request(args: &[String]) -> Result<(), Fail> {
     let options = RequestOptions::parse(args)?;
@@ -141,16 +176,17 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
         .clone()
         .unwrap_or_else(|| discover_collection_dir(&options.file));
     let collection_path = base_dir.join("collection.yaml");
-    let collection = if collection_path.exists() {
+    let collection = if collection_path.is_file() {
         load_collection(&format, &collection_path)?
     } else {
         Collection::empty()
     };
 
+    // `global < collection < environment`; the engine still owns resolution.
     let mut vars = collection.vars.clone();
     if let Some(name) = options.env.as_deref() {
         let env_path = base_dir.join("environments").join(format!("{name}.yaml"));
-        if !env_path.exists() {
+        if !env_path.is_file() {
             return Err(Fail::config(format!(
                 "environment file not found: {}",
                 env_path.display()
@@ -159,35 +195,194 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
         vars = vars.merged_with(&load_vars(&format, &env_path)?);
     }
 
-    let secrets = load_secrets_from_env();
-    let redactor = Redactor::with_secrets(secrets.values());
+    let request_dto = convert::request_to_dto(&request);
+    let env_dto = convert::env_to_dto(&collection, &vars, options.seed);
 
-    let prepared = prepare_request_with_seed(&collection, &request, vars, &secrets, options.seed)?;
+    // The interactive path: a real `SendRequest` over the typed in-process channel.
+    let engine = Engine::from_store(store_from_env())?;
+    let (mut client, handle) = in_process_client(engine, 8).await?;
 
-    let client = HttpClient::new().map_err(map_http)?;
-    let response = client.send(prepared.clone()).await.map_err(map_http)?;
+    let (echo, response) = client.send_request(request_dto, env_dto).await?;
+    client.stop(true).await?;
+    drop(client);
 
-    print_request(&prepared, &redactor);
+    match handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(error.into()),
+        Err(join) => return Err(Fail::engine(format!("engine task failed: {join}"))),
+    }
+
+    print_echo(&echo);
     println!();
-    println!("HTTP {} ({})", response.status, response.version);
-    print!("{}", response.timings);
-    print_response(&response, &redactor, options.show_body, options.max_body);
-
+    print_response(&response, options.show_body, options.max_body);
     Ok(())
 }
 
-fn load_secrets_from_env() -> MapSecretStore {
-    let mut store = MapSecretStore::new();
-    for (key, value) in env::vars_os() {
-        let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
-            continue;
-        };
-        if let Some(name) = key.strip_prefix(SECRET_ENV_PREFIX) {
-            store.insert(name.to_string(), value);
+// ---- serve ----
+
+async fn run_serve(args: &[String]) -> Result<(), Fail> {
+    let mut stdio = false;
+    for arg in args {
+        match arg.as_str() {
+            "--stdio" => stdio = true,
+            "-h" | "--help" => {
+                print!("{}", usage());
+                return Ok(());
+            }
+            other => {
+                return Err(Fail::config(format!(
+                    "unknown option `{other}` (only `--stdio` is available in this phase)"
+                )));
+            }
         }
     }
-    store
+    if !stdio {
+        return Err(Fail::config(
+            "levi serve requires `--stdio`; a socket listener lands in Phase 6",
+        ));
+    }
+
+    let engine = Engine::from_store(store_from_env())?;
+    engine.serve(NdjsonTransport::stdio()).await?;
+    Ok(())
 }
+
+// ---- validate ----
+
+fn run_validate(args: &[String]) -> Result<(), Fail> {
+    let dir = match args {
+        [] => return Err(Fail::config("validate needs a <dir>")),
+        [dir] if !dir.starts_with('-') => PathBuf::from(dir),
+        [flag] => {
+            if flag == "-h" || flag == "--help" {
+                print!("{}", usage());
+                return Ok(());
+            }
+            return Err(Fail::config(format!("unknown option `{flag}`")));
+        }
+        _ => return Err(Fail::config("validate takes exactly one <dir>")),
+    };
+
+    let format = Yaml;
+    let mut checked = 0usize;
+    let mut failed = 0usize;
+
+    let mut check = |label: &Path, result: Result<(), FormatError>| {
+        checked += 1;
+        if let Err(error) = result {
+            failed += 1;
+            eprintln!("{}: {error}", label.display());
+        }
+    };
+
+    let collection_path = dir.join("collection.yaml");
+    if collection_path.is_file() {
+        check(
+            &collection_path,
+            load_collection(&format, &collection_path).map(|_| ()),
+        );
+    }
+
+    for path in yaml_files(&dir.join("environments"))? {
+        check(&path, load_vars(&format, &path).map(|_| ()));
+    }
+    for path in yaml_files(&dir.join("requests"))? {
+        check(&path, load_request(&format, &path).map(|_| ()));
+    }
+
+    if checked == 0 {
+        return Err(Fail::config(format!(
+            "no collection documents found under `{}`",
+            dir.display()
+        )));
+    }
+    if failed > 0 {
+        return Err(Fail::config(format!(
+            "{failed} of {checked} documents failed to parse"
+        )));
+    }
+
+    println!("ok: {checked} documents parsed");
+    Ok(())
+}
+
+/// `*.yaml` files in `dir`, sorted, or an empty list if `dir` is absent.
+fn yaml_files(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| Fail::config(format!("failed to read `{}`: {error}", dir.display())))?;
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml")
+                })
+        })
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+// ---- output ----
+
+fn print_echo(echo: &EchoDto) {
+    println!("{} {}", echo.method, echo.url);
+    for header in &echo.headers {
+        println!("  {}: {}", header.name, header.value);
+    }
+}
+
+fn print_response(response: &ResponseDto, show_body: bool, max_body: usize) {
+    println!("HTTP {} ({})", response.status, response.version);
+    print_timings(&response.timings);
+
+    println!("response headers:");
+    for header in &response.headers {
+        println!("  {}: {}", header.name, header.value);
+    }
+
+    if !show_body {
+        return;
+    }
+
+    let truncated = response.body.len() > max_body;
+    let shown: String = response.body.chars().take(max_body).collect();
+    println!();
+    if truncated {
+        println!("response body (first {max_body} bytes):");
+    } else {
+        println!("response body:");
+    }
+    println!("{shown}");
+}
+
+fn print_timings(timings: &TimingsDto) {
+    println!("  total      {:>10}", format_ms(timings.total_ms));
+    println!("  ttfb       {:>10}", format_ms(timings.ttfb_ms));
+    println!("  receive    {:>10}", format_ms(timings.receive_ms));
+    for (label, value) in [
+        ("dns", timings.dns_ms),
+        ("connect", timings.connect_ms),
+        ("tls", timings.tls_ms),
+    ] {
+        let shown = value.map(format_ms).unwrap_or_else(|| "n/a".to_string());
+        println!("  {label:<10} {shown:>10}");
+    }
+}
+
+fn format_ms(ms: f64) -> String {
+    if ms < 1.0 {
+        format!("{:.0} us", ms * 1_000.0)
+    } else {
+        format!("{ms:.3} ms")
+    }
+}
+
+// ---- options ----
 
 fn parent_dir(path: &Path) -> PathBuf {
     path.parent()
@@ -210,46 +405,6 @@ fn discover_collection_dir(request_path: &Path) -> PathBuf {
     start
 }
 
-fn print_request(prepared: &lev_core::PreparedRequest, redactor: &Redactor) {
-    println!(
-        "{} {}",
-        prepared.method.as_str(),
-        redactor.redact(&prepared.url)
-    );
-    for (name, value) in &prepared.headers {
-        println!("  {name}: {}", redactor.redact_header_value(name, value));
-    }
-}
-
-fn print_response(
-    response: &lev_http::Response,
-    redactor: &Redactor,
-    show_body: bool,
-    max_body: usize,
-) {
-    println!("response headers:");
-    for (name, value) in &response.headers {
-        println!("  {name}: {}", redactor.redact_header_value(name, value));
-    }
-
-    if !show_body {
-        return;
-    }
-
-    let text = String::from_utf8_lossy(&response.body);
-    let redacted = redactor.redact(&text);
-    let truncated = redacted.len() > max_body;
-    let shown: String = redacted.chars().take(max_body).collect();
-
-    println!();
-    if truncated {
-        println!("response body (first {max_body} bytes):");
-    } else {
-        println!("response body:");
-    }
-    println!("{shown}");
-}
-
 struct RequestOptions {
     file: PathBuf,
     collection: Option<PathBuf>,
@@ -263,7 +418,7 @@ impl RequestOptions {
     fn parse(args: &[String]) -> Result<Self, Fail> {
         let mut file: Option<PathBuf> = None;
         let mut collection = None;
-        let mut env = None;
+        let mut env_name = None;
         let mut seed = 0u64;
         let mut show_body = false;
         let mut max_body = 4096usize;
@@ -278,7 +433,7 @@ impl RequestOptions {
                 }
                 "--env" => {
                     index += 1;
-                    env = Some(next_value(args, index, "--env")?.to_string());
+                    env_name = Some(next_value(args, index, "--env")?.to_string());
                 }
                 "--seed" => {
                     index += 1;
@@ -296,7 +451,7 @@ impl RequestOptions {
                 }
                 "--show-body" => show_body = true,
                 "-h" | "--help" => {
-                    print!("{}", run_usage());
+                    print!("{}", usage());
                     std::process::exit(0);
                 }
                 other if other.starts_with('-') => {
@@ -316,7 +471,7 @@ impl RequestOptions {
         Ok(Self {
             file,
             collection,
-            env,
+            env: env_name,
             seed,
             show_body,
             max_body,
