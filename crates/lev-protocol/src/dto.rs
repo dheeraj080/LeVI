@@ -74,7 +74,7 @@ pub enum AuthDto {
     },
 }
 
-/// A request body in JSON-native shape.
+/// The request body in JSON-native shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum BodyDto {
@@ -100,6 +100,63 @@ pub enum BodyDto {
     },
 }
 
+/// The two JavaScript hooks, carried to the engine as source text.
+///
+/// Scripts are executable code, so they only ever cross the in-process channel or
+/// stdio to a child the user themselves spawned — never to a remote agent (Phase 6 will
+/// require an explicit opt-in).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptsDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_response: Option<String>,
+}
+
+impl ScriptsDto {
+    pub fn is_empty(&self) -> bool {
+        self.pre_request.is_none() && self.post_response.is_none()
+    }
+}
+
+/// A declarative expectation, tagged `kind` on the wire like the other unions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AssertionDto {
+    Status {
+        code: u16,
+    },
+    Header {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contains: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    BodyContains {
+        text: String,
+    },
+    JsonPath {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        equals: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ResponseTimeUnder {
+        max_ms: u64,
+    },
+}
+
+/// One check outcome: from a declarative assertion or a script's `lev.test(...)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckDto {
+    pub name: String,
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// A request as authored: templates are intact and resolved by the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +171,10 @@ pub struct RequestDto {
     pub body: Option<BodyDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<ScriptsDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<AssertionDto>,
 }
 
 /// The scope a request is resolved against.
@@ -186,6 +247,7 @@ pub struct ResponseDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::Message;
 
     #[test]
     fn var_value_is_either_a_plain_string_or_a_secret_name() {
@@ -244,11 +306,73 @@ mod tests {
             headers: vec![],
             body: None,
             auth: None,
+            scripts: None,
+            assertions: vec![],
         };
         let json = serde_json::to_string(&request).unwrap();
         // Empty collections are omitted entirely.
         assert!(!json.contains("headers"), "{json}");
         assert_eq!(serde_json::from_str::<RequestDto>(&json).unwrap(), request);
+    }
+
+    #[test]
+    fn scripts_and_assertions_round_trip() {
+        let request = RequestDto {
+            id: "r1".to_string(),
+            name: "R".to_string(),
+            method: "POST".to_string(),
+            url: "/things".to_string(),
+            headers: vec![],
+            body: None,
+            auth: None,
+            scripts: Some(ScriptsDto {
+                pre_request: Some("lev.log('hi');".to_string()),
+                post_response: None,
+            }),
+            assertions: vec![
+                AssertionDto::Status { code: 201 },
+                AssertionDto::Header {
+                    name: "content-type".to_string(),
+                    contains: Some("json".to_string()),
+                },
+                AssertionDto::ResponseTimeUnder { max_ms: 500 },
+            ],
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"preRequest\":\"lev.log('hi');\""), "{json}");
+        assert!(json.contains("\"kind\":\"status\""), "{json}");
+        assert!(json.contains("\"maxMs\":500"), "{json}");
+        assert_eq!(serde_json::from_str::<RequestDto>(&json).unwrap(), request);
+    }
+
+    #[test]
+    fn request_result_carries_checks_and_logs() {
+        let result = Message::RequestResult {
+            request: EchoDto {
+                method: "GET".to_string(),
+                url: "https://api.test/".to_string(),
+                headers: vec![],
+                body_len: 0,
+            },
+            response: ResponseDto {
+                status: 200,
+                version: "HTTP/1.1".to_string(),
+                headers: vec![],
+                body: String::new(),
+                body_len: 0,
+                timings: TimingsDto::default(),
+            },
+            checks: vec![CheckDto {
+                name: "status is 200".to_string(),
+                passed: true,
+                message: None,
+            }],
+            logs: vec!["hello".to_string()],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"checks\""), "{json}");
+        assert!(json.contains("\"logs\""), "{json}");
+        assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), result);
     }
 
     #[test]

@@ -8,13 +8,13 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use lev_core::{
-    ApiKeyLocation, Auth, Body, Collection, Method, PreparedRequest, Redactor, RequestDef,
-    SecretName, Template, VarSet, VarValue,
+    ApiKeyLocation, Assertion, Auth, Body, Check, Collection, Method, PreparedRequest, Redactor,
+    RequestDef, Scripts, SecretName, Template, VarSet, VarValue,
 };
 use lev_http::{Response, Timings};
 use lev_protocol::{
-    ApiKeyLocationDto, AuthDto, BodyDto, EchoDto, EnvDto, FormFieldDto, HeaderDto, RequestDto,
-    ResponseDto, TimingsDto, VarValueDto,
+    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CheckDto, EchoDto, EnvDto, FormFieldDto,
+    HeaderDto, RequestDto, ResponseDto, ScriptsDto, TimingsDto, VarValueDto,
 };
 
 use crate::error::EngineError;
@@ -38,7 +38,8 @@ pub fn request_from_dto(dto: RequestDto) -> Result<RequestDef, EngineError> {
         headers,
         body: body_from_dto(dto.body)?,
         auth: dto.auth.map(auth_from_dto).transpose()?,
-        scripts: Default::default(),
+        scripts: scripts_from_dto(dto.scripts),
+        assertions: dto.assertions.into_iter().map(assertion_from_dto).collect(),
     })
 }
 
@@ -59,6 +60,67 @@ pub fn request_to_dto(request: &RequestDef) -> RequestDto {
             .collect(),
         body: body_to_dto(&request.body),
         auth: request.auth.as_ref().map(auth_to_dto),
+        scripts: scripts_to_dto(&request.scripts),
+        assertions: request.assertions.iter().map(assertion_to_dto).collect(),
+    }
+}
+
+fn scripts_from_dto(dto: Option<ScriptsDto>) -> Scripts {
+    match dto {
+        Some(dto) => Scripts {
+            pre_request: dto.pre_request,
+            post_response: dto.post_response,
+        },
+        None => Scripts::default(),
+    }
+}
+
+fn scripts_to_dto(scripts: &Scripts) -> Option<ScriptsDto> {
+    if scripts.is_empty() {
+        return None;
+    }
+    Some(ScriptsDto {
+        pre_request: scripts.pre_request.clone(),
+        post_response: scripts.post_response.clone(),
+    })
+}
+
+fn assertion_from_dto(dto: AssertionDto) -> Assertion {
+    match dto {
+        AssertionDto::Status { code } => Assertion::Status(code),
+        AssertionDto::Header { name, contains } => Assertion::Header { name, contains },
+        AssertionDto::BodyContains { text } => Assertion::BodyContains(text),
+        AssertionDto::JsonPath { path, equals } => Assertion::JsonPath { path, equals },
+        AssertionDto::ResponseTimeUnder { max_ms } => {
+            Assertion::ResponseTimeUnder(Duration::from_millis(max_ms))
+        }
+    }
+}
+
+fn assertion_to_dto(assertion: &Assertion) -> AssertionDto {
+    match assertion {
+        Assertion::Status(code) => AssertionDto::Status { code: *code },
+        Assertion::Header { name, contains } => AssertionDto::Header {
+            name: name.clone(),
+            contains: contains.clone(),
+        },
+        Assertion::BodyContains(text) => AssertionDto::BodyContains { text: text.clone() },
+        Assertion::JsonPath { path, equals } => AssertionDto::JsonPath {
+            path: path.clone(),
+            equals: equals.clone(),
+        },
+        Assertion::ResponseTimeUnder(max) => AssertionDto::ResponseTimeUnder {
+            max_ms: max.as_millis() as u64,
+        },
+    }
+}
+
+/// Project a check onto the wire. The caller must have redacted it already.
+pub fn check_to_dto(check: &Check) -> CheckDto {
+    CheckDto {
+        name: check.name.clone(),
+        passed: check.passed,
+        message: check.message.clone(),
     }
 }
 
@@ -302,6 +364,7 @@ mod tests {
             body: Body::Json("{\"sku\":\"{{sku}}\"}".to_string()),
             auth: Some(Auth::Bearer(Template::parse("{{token}}").unwrap())),
             scripts: Default::default(),
+            assertions: Vec::new(),
         }
     }
 
@@ -358,9 +421,36 @@ mod tests {
             headers: vec![],
             body: None,
             auth: None,
+            scripts: None,
+            assertions: vec![],
         };
         let error = request_from_dto(dto).unwrap_err();
         assert_eq!(error.code(), lev_protocol::ErrorCode::Config);
+    }
+
+    #[test]
+    fn scripts_and_assertions_survive_the_wire() {
+        let mut original = sample_request();
+        original.scripts = Scripts {
+            pre_request: Some("lev.log('pre');".to_string()),
+            post_response: Some("lev.test('ok', true);".to_string()),
+        };
+        original.assertions = vec![
+            Assertion::Status(200),
+            Assertion::Header {
+                name: "content-type".to_string(),
+                contains: Some("json".to_string()),
+            },
+            Assertion::BodyContains("ok".to_string()),
+            Assertion::JsonPath {
+                path: "id".to_string(),
+                equals: Some("7".to_string()),
+            },
+            Assertion::ResponseTimeUnder(Duration::from_millis(500)),
+        ];
+
+        let rebuilt = request_from_dto(request_to_dto(&original)).unwrap();
+        assert_eq!(original, rebuilt);
     }
 
     #[test]

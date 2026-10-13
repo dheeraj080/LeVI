@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::dto::{EchoDto, EnvDto, RequestDto, ResponseDto};
+use crate::dto::{CheckDto, EchoDto, EnvDto, RequestDto, ResponseDto};
 use crate::version::Version;
 
 /// A capability the engine advertises during the handshake.
@@ -110,9 +110,17 @@ pub enum Message {
     Ready { version: Version, engine: String },
 
     /// The result of a `SendRequest`. Both halves are already redacted.
+    ///
+    /// `checks` are the declarative assertions plus any `lev.test(...)` outcomes;
+    /// `logs` are the script's `lev.log` lines. Both are redacted — a script that
+    /// logs a secret cannot leak it.
     RequestResult {
         request: EchoDto,
         response: ResponseDto,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        checks: Vec<CheckDto>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        logs: Vec<String>,
     },
 
     /// A log line. Always redacted; may be dropped under back-pressure.

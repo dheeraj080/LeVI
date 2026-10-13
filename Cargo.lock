@@ -662,9 +662,11 @@ dependencies = [
 name = "lev-engine"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "lev-core",
  "lev-http",
  "lev-protocol",
+ "lev-script",
  "serde_json",
  "thiserror",
  "tokio",
@@ -709,6 +711,16 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "lev-script"
+version = "0.0.0"
+dependencies = [
+ "lev-core",
+ "rquickjs",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -899,6 +911,33 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rquickjs"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c5227859c4dfc83f428e58f9569bf439e628c8d139020e7faff437e6f5abaa0"
+dependencies = [
+ "rquickjs-core",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e82e0ca83028ad5b533b53b96c395bbaab905a5774de4aaf1004eeacafa3d85d"
+dependencies = [
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fed0097b0b4fbb2a87f6dd3b995a7c64ca56de30007eb7e867dfdfc78324ba5"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

@@ -102,6 +102,12 @@ pub struct MetricSnapshot {
     pub http_req_failed: u64,
     /// `iterations`: completed scenario iterations.
     pub iterations: u64,
+    /// `checks`: every check evaluated (pass or fail).
+    pub checks: u64,
+    /// `checks_failed`: checks that did not pass.
+    pub checks_failed: u64,
+    /// `script_errors`: script invocations that failed (compile, runtime, budget).
+    pub script_errors: u64,
     /// `vus`: active virtual users at the sample point.
     pub vus: u32,
     /// `scheduler_lag`: how far the generator has fallen behind its schedule.
@@ -122,6 +128,9 @@ impl MetricSnapshot {
             http_reqs: 0,
             http_req_failed: 0,
             iterations: 0,
+            checks: 0,
+            checks_failed: 0,
+            script_errors: 0,
             vus: 0,
             scheduler_lag: Duration::ZERO,
             latency: LatencySummary::default(),
@@ -144,6 +153,10 @@ pub mod metric_names {
     pub const HTTP_REQ_BLOCKED: &str = "http_req_blocked";
     pub const HTTP_REQ_FAILED: &str = "http_req_failed";
     pub const ITERATIONS: &str = "iterations";
+    /// Check outcomes (§4.7: "Checks/assertions -> metrics").
+    pub const CHECKS: &str = "checks";
+    pub const CHECKS_FAILED: &str = "checks_failed";
+    pub const SCRIPT_ERRORS: &str = "script_errors";
     pub const VUS: &str = "vus";
     pub const SCHEDULER_LAG: &str = "scheduler_lag";
     pub const MAX_VUS_HIT: &str = "max_vus_hit";
@@ -161,6 +174,9 @@ pub struct MetricsRecorder {
     http_reqs: u64,
     http_req_failed: u64,
     iterations: u64,
+    checks: u64,
+    checks_failed: u64,
+    script_errors: u64,
     vus: u32,
 }
 
@@ -182,6 +198,17 @@ impl MetricsRecorder {
         self.iterations += count;
     }
 
+    /// Record a batch of check outcomes.
+    pub fn record_checks(&mut self, passed: u64, failed: u64) {
+        self.checks += passed + failed;
+        self.checks_failed += failed;
+    }
+
+    /// Record a script invocation that failed (compile, runtime, or budget).
+    pub fn record_script_error(&mut self) {
+        self.script_errors += 1;
+    }
+
     /// Set the active virtual-user count at the sample point.
     pub fn set_vus(&mut self, vus: u32) {
         self.vus = vus;
@@ -198,6 +225,9 @@ impl MetricsRecorder {
             http_reqs: self.http_reqs,
             http_req_failed: self.http_req_failed,
             iterations: self.iterations,
+            checks: self.checks,
+            checks_failed: self.checks_failed,
+            script_errors: self.script_errors,
             vus: self.vus,
             scheduler_lag,
             latency: LatencySummary::default(),
@@ -240,6 +270,18 @@ mod tests {
     }
 
     #[test]
+    fn checks_and_script_errors_are_counted() {
+        let mut recorder = MetricsRecorder::new();
+        recorder.record_checks(3, 1);
+        recorder.record_checks(2, 0);
+        recorder.record_script_error();
+        let snapshot = recorder.snapshot(Duration::from_secs(1), Duration::ZERO);
+        assert_eq!(snapshot.checks, 6);
+        assert_eq!(snapshot.checks_failed, 1);
+        assert_eq!(snapshot.script_errors, 1);
+    }
+
+    #[test]
     fn only_finished_is_terminal() {
         assert!(RunState::Finished.is_terminal());
         for state in [
@@ -261,6 +303,9 @@ mod tests {
             metric_names::HTTP_REQ_TLS_HANDSHAKING,
             "http_req_tls_handshaking"
         );
+        assert_eq!(metric_names::CHECKS, "checks");
+        assert_eq!(metric_names::CHECKS_FAILED, "checks_failed");
+        assert_eq!(metric_names::SCRIPT_ERRORS, "script_errors");
         assert_eq!(metric_names::VUS, "vus");
     }
 }

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The protocol version this build speaks.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 1);
+pub const PROTOCOL_VERSION: Version = Version::new(0, 2);
 
 /// A `major.minor` protocol version.
 ///

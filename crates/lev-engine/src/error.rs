@@ -23,9 +23,17 @@ pub enum EngineError {
     #[error(transparent)]
     Core(#[from] lev_core::CoreError),
 
+    /// A pre-request or post-response script failed to compile or run.
+    #[error(transparent)]
+    Script(#[from] lev_script::ScriptError),
+
     /// The request could not be sent.
     #[error(transparent)]
     Http(#[from] lev_http::HttpError),
+
+    /// An internal engine failure: a bug, or a background task that could not finish.
+    #[error("{0}")]
+    Internal(String),
 
     /// The peer asked for something this build does not implement.
     #[error("`{0}` is not supported by this build")]
@@ -44,6 +52,9 @@ impl EngineError {
             EngineError::Protocol(_) => ErrorCode::BadMessage,
             EngineError::Config(_) => ErrorCode::Config,
             EngineError::Core(_) => ErrorCode::Config,
+            // A script is part of the request definition, so a broken one is the
+            // author's mistake, not an engine fault — including a runaway loop.
+            EngineError::Script(_) => ErrorCode::Config,
             EngineError::Http(error) => {
                 if http_is_config(error) {
                     ErrorCode::Config
@@ -51,6 +62,7 @@ impl EngineError {
                     ErrorCode::Engine
                 }
             }
+            EngineError::Internal(_) => ErrorCode::Internal,
             EngineError::Unsupported(_) => ErrorCode::Unsupported,
             EngineError::Remote { code, .. } => *code,
         }
@@ -101,6 +113,13 @@ mod tests {
             EngineError::Transport(lev_protocol::TransportError::Closed).code(),
             ErrorCode::Engine
         );
+    }
+
+    #[test]
+    fn a_script_failure_is_a_configuration_error() {
+        // A runaway script is the author's mistake, not an engine fault.
+        let error = EngineError::Script(lev_script::ScriptError::Runtime("boom".to_string()));
+        assert_eq!(error.code(), ErrorCode::Config);
     }
 
     #[test]

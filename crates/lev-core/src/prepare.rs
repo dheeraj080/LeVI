@@ -234,6 +234,7 @@ mod tests {
             body: Body::None,
             auth: None,
             scripts: Default::default(),
+            assertions: Vec::new(),
         }
     }
 

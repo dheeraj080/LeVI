@@ -18,14 +18,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod checks;
 mod client;
 pub mod convert;
 mod engine;
 pub mod error;
 pub mod secrets;
 
-pub use client::{in_process_client, Client};
-pub use engine::Engine;
+pub use client::{in_process_client, Client, RequestOutcome};
+pub use engine::{Dispatch, Engine};
 pub use error::EngineError;
 pub use secrets::{redactor_for, store_from_env, SECRET_ENV_PREFIX};
 

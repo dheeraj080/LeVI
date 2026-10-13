@@ -14,3 +14,21 @@ headers:
 body:
   json: |
     {"id": "{{thing_id}}", "note": "{{$randomInt}}"}
+scripts:
+  preRequest: |
+    lev.test('thing_id is set', function () {
+      lev.expect(lev.env.get('thing_id')).toBeTruthy();
+    });
+  postResponse: |
+    lev.test('created', lev.response.status === 201);
+    lev.env.set('created_id', lev.response.json ? String(lev.response.json.id) : '');
+assertions:
+- status: 201
+- header:
+    name: content-type
+    contains: application/json
+- bodyContains: "\"id\""
+- jsonPath:
+    path: id
+    equals: "{{thing_id}}"
+- responseTimeUnderMs: 500

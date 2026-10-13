@@ -34,6 +34,8 @@ fn get_request(url: String) -> RequestDto {
         headers: vec![],
         body: None,
         auth: None,
+        scripts: None,
+        assertions: vec![],
     }
 }
 
@@ -70,13 +72,15 @@ async fn a_request_travels_through_the_protocol_and_comes_back() {
     let engine = engine_with_secret("token", "s3cr3t-token");
     let (mut client, handle) = in_process_client(engine, 8).await.expect("connect");
 
-    let (echo, response) = client
+    let outcome = client
         .send_request(
             get_request(format!("{}/hello", server.uri())),
             bearer_env("token", None),
         )
         .await
         .expect("request");
+    let echo = outcome.echo;
+    let response = outcome.response;
 
     assert_eq!(response.status, 200);
     assert_eq!(response.body, "{\"ok\":true}");
@@ -101,13 +105,15 @@ async fn the_engine_applies_collection_auth_and_a_relative_url() {
     let engine = engine_with_secret("token", "s3cr3t-token");
     let (mut client, handle) = in_process_client(engine, 8).await.expect("connect");
 
-    let (echo, response) = client
+    let outcome = client
         .send_request(
             get_request("/v1/orders".to_string()),
             bearer_env("token", Some(server.uri())),
         )
         .await
         .expect("request");
+    let echo = outcome.echo;
+    let response = outcome.response;
 
     // The matcher required the real bearer header, so a 200 proves auth was applied.
     assert_eq!(response.status, 200);
@@ -138,13 +144,14 @@ async fn a_secret_echoed_by_the_target_is_redacted_before_it_crosses_the_boundar
     let engine = engine_with_secret("token", "s3cr3t-token");
     let (mut client, handle) = in_process_client(engine, 8).await.expect("connect");
 
-    let (_, response) = client
+    let response = client
         .send_request(
             get_request(format!("{}/echo", server.uri())),
             bearer_env("token", None),
         )
         .await
-        .expect("request");
+        .expect("request")
+        .response;
 
     assert!(!response.body.contains("s3cr3t-token"), "{}", response.body);
     assert!(response.body.contains(lev_core::MASK), "{}", response.body);
@@ -277,13 +284,14 @@ async fn a_client_and_engine_speak_the_same_protocol_over_stdio() {
     .expect("connect");
     assert_eq!(client.version(), lev_protocol::PROTOCOL_VERSION);
 
-    let (_, response) = client
+    let response = client
         .send_request(
             get_request(format!("{}/ping", server.uri())),
             EnvDto::default(),
         )
         .await
-        .expect("request");
+        .expect("request")
+        .response;
     assert_eq!(response.status, 204);
 
     client.stop(true).await.expect("stop");

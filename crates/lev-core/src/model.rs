@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::assert::Assertion;
 use crate::secrets::SecretName;
 use crate::template::Template;
 
@@ -132,11 +133,22 @@ pub enum Body {
     File(Template),
 }
 
-/// Pre- and post-request scripts. Execution is Phase 2; the shape is fixed here.
+/// Pre- and post-request scripts.
+///
+/// Authored as JavaScript and executed in the `lev-script` sandbox: the pre-request
+/// script may mutate the resolved request, the post-response script may inspect the
+/// response and record checks.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scripts {
     pub pre_request: Option<String>,
     pub post_response: Option<String>,
+}
+
+impl Scripts {
+    /// True when neither hook is present, so callers can skip the sandbox entirely.
+    pub fn is_empty(&self) -> bool {
+        self.pre_request.is_none() && self.post_response.is_none()
+    }
 }
 
 /// A collection of requests plus shared variables, auth, and base URL.
@@ -173,4 +185,7 @@ pub struct RequestDef {
     pub body: Body,
     pub auth: Option<Auth>,
     pub scripts: Scripts,
+    /// Declarative expectations, evaluated against the response after any
+    /// post-response script. Each becomes a [`Check`](crate::Check) in the result.
+    pub assertions: Vec<Assertion>,
 }

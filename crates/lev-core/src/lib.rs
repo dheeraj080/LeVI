@@ -8,6 +8,7 @@
 //! to and from these types. Everything here is testable without a runtime.
 #![forbid(unsafe_code)]
 
+pub mod assert;
 pub mod context;
 pub mod error;
 pub mod model;
@@ -16,6 +17,7 @@ pub mod redact;
 pub mod secrets;
 pub mod template;
 
+pub use assert::{Assertion, Check};
 pub use context::Context;
 pub use error::{CoreError, Result};
 pub use model::{

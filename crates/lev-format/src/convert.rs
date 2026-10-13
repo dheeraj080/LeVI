@@ -2,15 +2,17 @@
 //! Conversions between the on-disk DTOs and the core domain model.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use lev_core::{
-    ApiKeyLocation, Auth, Body, Collection, Method, RequestDef, SecretName, Template, VarSet,
-    VarValue,
+    ApiKeyLocation, Assertion, Auth, Body, Collection, Method, RequestDef, Scripts, SecretName,
+    Template, VarSet, VarValue,
 };
 
 use crate::dto::{
-    ApiKeyLocationDto, AuthDto, BodyDto, CollectionDto, FormFieldDto, HeaderDto, RawBodyDto,
-    RequestDto, VarValueDto,
+    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CollectionDto, FormFieldDto,
+    HeaderAssertionDto, HeaderDto, JsonPathAssertionDto, RawBodyDto, RequestDto, ScriptsDto,
+    VarValueDto,
 };
 use crate::error::FormatError;
 
@@ -57,7 +59,8 @@ pub fn request_to_core(dto: RequestDto) -> Result<RequestDef, FormatError> {
         headers,
         body: body_to_core(dto.body)?,
         auth: dto.auth.map(auth_to_core).transpose()?,
-        scripts: Default::default(),
+        scripts: scripts_to_core(dto.scripts),
+        assertions: dto.assertions.into_iter().map(assertion_to_core).collect(),
     })
 }
 
@@ -77,6 +80,64 @@ pub fn request_from_core(request: &RequestDef) -> RequestDto {
             .collect(),
         body: body_from_core(&request.body),
         auth: request.auth.as_ref().map(auth_from_core),
+        scripts: scripts_from_core(&request.scripts),
+        assertions: request.assertions.iter().map(assertion_from_core).collect(),
+    }
+}
+
+fn scripts_to_core(dto: ScriptsDto) -> Scripts {
+    Scripts {
+        pre_request: dto.pre_request,
+        post_response: dto.post_response,
+    }
+}
+
+fn scripts_from_core(scripts: &Scripts) -> ScriptsDto {
+    ScriptsDto {
+        pre_request: scripts.pre_request.clone(),
+        post_response: scripts.post_response.clone(),
+    }
+}
+
+fn assertion_to_core(dto: AssertionDto) -> Assertion {
+    match dto {
+        AssertionDto::Status { status } => Assertion::Status(status),
+        AssertionDto::Header { header } => Assertion::Header {
+            name: header.name,
+            contains: header.contains,
+        },
+        AssertionDto::BodyContains { body_contains } => Assertion::BodyContains(body_contains),
+        AssertionDto::JsonPath { json_path } => Assertion::JsonPath {
+            path: json_path.path,
+            equals: json_path.equals,
+        },
+        AssertionDto::ResponseTime {
+            response_time_under_ms,
+        } => Assertion::ResponseTimeUnder(Duration::from_millis(response_time_under_ms)),
+    }
+}
+
+fn assertion_from_core(assertion: &Assertion) -> AssertionDto {
+    match assertion {
+        Assertion::Status(status) => AssertionDto::Status { status: *status },
+        Assertion::Header { name, contains } => AssertionDto::Header {
+            header: HeaderAssertionDto {
+                name: name.clone(),
+                contains: contains.clone(),
+            },
+        },
+        Assertion::BodyContains(text) => AssertionDto::BodyContains {
+            body_contains: text.clone(),
+        },
+        Assertion::JsonPath { path, equals } => AssertionDto::JsonPath {
+            json_path: JsonPathAssertionDto {
+                path: path.clone(),
+                equals: equals.clone(),
+            },
+        },
+        Assertion::ResponseTimeUnder(max) => AssertionDto::ResponseTime {
+            response_time_under_ms: max.as_millis() as u64,
+        },
     }
 }
 

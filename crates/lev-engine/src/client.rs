@@ -6,13 +6,35 @@
 //! it cannot tell local from remote execution because there is no difference to see.
 
 use lev_protocol::{
-    in_process_channel, Capability, EchoDto, EnvDto, InProcessTransport, Message, ProtocolError,
-    RequestDto, ResponseDto, Transport, TransportError, Version, PROTOCOL_VERSION,
+    in_process_channel, Capability, CheckDto, EchoDto, EnvDto, InProcessTransport, Message,
+    ProtocolError, RequestDto, ResponseDto, Transport, TransportError, Version, PROTOCOL_VERSION,
 };
 use tokio::task::JoinHandle;
 
 use crate::engine::Engine;
 use crate::error::EngineError;
+
+/// Everything a single request produced: the redacted echo, the response, and any
+/// checks or script logs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestOutcome {
+    pub echo: EchoDto,
+    pub response: ResponseDto,
+    pub checks: Vec<CheckDto>,
+    pub logs: Vec<String>,
+}
+
+impl RequestOutcome {
+    /// True when every check passed (and there was at least one).
+    pub fn checks_passed(&self) -> bool {
+        !self.checks.is_empty() && self.checks.iter().all(|check| check.passed)
+    }
+
+    /// The number of checks that failed.
+    pub fn checks_failed(&self) -> usize {
+        self.checks.iter().filter(|check| !check.passed).count()
+    }
+}
 
 /// A connected protocol client.
 pub struct Client<T: Transport> {
@@ -63,12 +85,22 @@ impl<T: Transport> Client<T> {
         &mut self,
         request: RequestDto,
         env: EnvDto,
-    ) -> Result<(EchoDto, ResponseDto), EngineError> {
+    ) -> Result<RequestOutcome, EngineError> {
         self.transport
             .send(Message::SendRequest { request, env })
             .await?;
         match self.transport.recv().await? {
-            Some(Message::RequestResult { request, response }) => Ok((request, response)),
+            Some(Message::RequestResult {
+                request,
+                response,
+                checks,
+                logs,
+            }) => Ok(RequestOutcome {
+                echo: request,
+                response,
+                checks,
+                logs,
+            }),
             Some(Message::Error { code, msg }) => Err(EngineError::Remote { code, msg }),
             Some(other) => Err(EngineError::Protocol(ProtocolError::Unexpected(
                 other.type_name().to_string(),

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lev_core::{Collection, CoreError};
-use lev_engine::{convert, in_process_client, store_from_env, Engine, EngineError};
+use lev_engine::{convert, in_process_client, store_from_env, Engine, EngineError, RequestOutcome};
 use lev_format::{load_collection, load_request, load_vars, FormatError, Yaml};
 use lev_protocol::{EchoDto, ErrorCode, NdjsonTransport, ResponseDto, TimingsDto};
 
@@ -26,8 +26,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // Exit codes are a contract for CI and are documented permanently (see README).
 /// Success.
 const EXIT_SUCCESS: u8 = 0;
-/// A threshold failed. Reserved: thresholds land in Phase 3.
-#[allow(dead_code)]
+/// A check failed. (Thresholds, which share this code, land in Phase 3.)
 const EXIT_THRESHOLD: u8 = 1;
 /// A configuration or usage error.
 const EXIT_CONFIG: u8 = 2;
@@ -72,13 +71,15 @@ REQUEST OPTIONS:
 
 EXIT CODES:
     0  success
-    1  threshold failed
+    1  a check failed (thresholds, which share this code, land in Phase 3)
     2  configuration or usage error
     3  engine error
     4  aborted
 
 Secrets are read from environment variables named LEVI_SECRET_<NAME>. The engine
-redacts secret values before anything is printed or crosses the protocol.
+redacts secret values before anything is printed or crosses the protocol. Pre- and
+post-request scripts run in a sandbox with a CPU budget and a memory limit; checks
+from `lev.test(...)` and from `assertions:` are reported and set the exit code.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -202,7 +203,7 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
     let engine = Engine::from_store(store_from_env())?;
     let (mut client, handle) = in_process_client(engine, 8).await?;
 
-    let (echo, response) = client.send_request(request_dto, env_dto).await?;
+    let outcome = client.send_request(request_dto, env_dto).await?;
     client.stop(true).await?;
     drop(client);
 
@@ -212,9 +213,18 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
         Err(join) => return Err(Fail::engine(format!("engine task failed: {join}"))),
     }
 
-    print_echo(&echo);
+    print_echo(&outcome.echo);
     println!();
-    print_response(&response, options.show_body, options.max_body);
+    print_response(&outcome.response, options.show_body, options.max_body);
+    print_checks(&outcome);
+
+    let failed = outcome.checks_failed();
+    if failed > 0 {
+        return Err(Fail {
+            message: format!("{failed} of {} checks failed", outcome.checks.len()),
+            code: EXIT_THRESHOLD,
+        });
+    }
     Ok(())
 }
 
@@ -358,6 +368,24 @@ fn print_response(response: &ResponseDto, show_body: bool, max_body: usize) {
         println!("response body:");
     }
     println!("{shown}");
+}
+
+fn print_checks(outcome: &RequestOutcome) {
+    for log in &outcome.logs {
+        println!("log: {log}");
+    }
+    if outcome.checks.is_empty() {
+        return;
+    }
+    println!();
+    println!("checks ({}):", outcome.checks.len());
+    for check in &outcome.checks {
+        let mark = if check.passed { "PASS" } else { "FAIL" };
+        match &check.message {
+            Some(message) => println!("  [{mark}] {} — {message}", check.name),
+            None => println!("  [{mark}] {}", check.name),
+        }
+    }
 }
 
 fn print_timings(timings: &TimingsDto) {

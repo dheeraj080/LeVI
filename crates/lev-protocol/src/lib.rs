@@ -26,8 +26,8 @@ mod transport;
 mod version;
 
 pub use dto::{
-    ApiKeyLocationDto, AuthDto, BodyDto, EchoDto, EnvDto, FormFieldDto, HeaderDto, RequestDto,
-    ResponseDto, TimingsDto, VarValueDto,
+    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CheckDto, EchoDto, EnvDto, FormFieldDto,
+    HeaderDto, RequestDto, ResponseDto, ScriptsDto, TimingsDto, VarValueDto,
 };
 pub use error::{ProtocolError, TransportError};
 pub use message::{Capability, ErrorCode, LogLevel, Message};

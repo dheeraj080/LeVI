@@ -100,6 +100,81 @@ pub enum BodyDto {
     File { file: String },
 }
 
+/// The two JavaScript hooks, authored as block scalars.
+///
+/// ```yaml
+/// scripts:
+///   preRequest: |
+///     lev.env.set('trace', lev.random.uuid());
+///   postResponse: |
+///     lev.test('ok', lev.response.status === 200);
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptsDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_response: Option<String>,
+}
+
+impl ScriptsDto {
+    pub fn is_empty(&self) -> bool {
+        self.pre_request.is_none() && self.post_response.is_none()
+    }
+}
+
+/// The `header` assertion payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderAssertionDto {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+/// The `jsonPath` assertion payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonPathAssertionDto {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<String>,
+}
+
+/// A declarative expectation, in the most readable single-key form:
+///
+/// ```yaml
+/// assertions:
+///   - status: 200
+///   - header: { name: content-type, contains: application/json }
+///   - bodyContains: '"ok":true'
+///   - jsonPath: { path: id, equals: "7" }
+///   - responseTimeUnderMs: 500
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum AssertionDto {
+    Status {
+        status: u16,
+    },
+    Header {
+        header: HeaderAssertionDto,
+    },
+    #[serde(rename_all = "camelCase")]
+    BodyContains {
+        body_contains: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    JsonPath {
+        json_path: JsonPathAssertionDto,
+    },
+    #[serde(rename_all = "camelCase")]
+    ResponseTime {
+        response_time_under_ms: u64,
+    },
+}
+
 /// `requests/*.yaml` — one request per file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +190,10 @@ pub struct RequestDto {
     pub body: Option<BodyDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthDto>,
+    #[serde(default, skip_serializing_if = "ScriptsDto::is_empty")]
+    pub scripts: ScriptsDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<AssertionDto>,
 }
 
 /// `environments/<env>.yaml`.

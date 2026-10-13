@@ -1,0 +1,31 @@
+id: scripted-order
+name: Scripted order
+method: POST
+url: /orders
+headers:
+  - name: Accept
+    value: application/json
+body:
+  json: |
+    {"sku": "placeholder"}
+scripts:
+  preRequest: |
+    // Rewrite the request before it goes out.
+    lev.request.headers['X-Trace'] = lev.random.uuid();
+    lev.request.body = JSON.stringify({
+      sku: lev.random.string(8),
+      note: lev.env.get('greeting'),
+    });
+  postResponse: |
+    // The hook sees the response and can record extra checks.
+    lev.log('created with trace ' + lev.request.headers['X-Trace']);
+    lev.test('the target echoed the method', function () {
+      lev.expect(lev.response.json.method).toBe('POST');
+    });
+    lev.env.set('last_order_path', lev.response.json.path);
+assertions:
+  - status: 200
+  - bodyContains: '"path":"/orders"'
+  - jsonPath:
+      path: method
+      equals: POST

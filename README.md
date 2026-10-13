@@ -7,21 +7,25 @@ separate load-testing tool and no rewriting requests in k6 syntax: the same requ
 the same scripts, the same environment — fired once for interactive debugging, or tens
 of thousands of times per second for a load run.
 
-> **Status: Phase 1 (protocol + interactive engine).** The engine is built as a
-> standalone Rust CLI first, per the build plan. `levi request` works end to end *through
-> the protocol boundary*, with real HTTP, per-phase timing, and secrets redacted inside
-> the engine; `levi serve --stdio` speaks the same protocol over NDJSON. Protocol v0 is
-> frozen — see [`PROTOCOL.md`](PROTOCOL.md). `levi run` and load testing land in Phase 3.
+> **Status: Phase 2 (scripting).** The engine is built as a standalone Rust CLI first,
+> per the build plan. `levi request` works end to end *through the protocol boundary*,
+> with real HTTP, per-phase timing, and secrets redacted inside the engine; `levi serve
+> --stdio` speaks the same protocol over NDJSON. Protocol v0.2 is frozen - see
+> [`PROTOCOL.md`](PROTOCOL.md). Requests may carry JavaScript pre/post hooks and
+> declarative assertions, run in a sandboxed QuickJS runtime with a CPU budget and a
+> memory limit; a runaway script fails one request and never hangs the run. `levi run`
+> and load testing land in Phase 3.
 
 ## Layout
 
 ```
 crates/
-  lev-core/      pure domain model — no I/O, no serde
+  lev-core/      pure domain model - no I/O, no serde
+  lev-script/    the QuickJS sandbox: the lev.* API, limits, pooled contexts
   lev-format/    collection format: on-disk DTOs + (de)serialization
   lev-http/      the single hyper-based HTTP transport
   lev-protocol/  the wire protocol: versioned DTOs + transports (cannot see lev-core)
-  lev-engine/    the facade: DTO <-> core conversions, redaction, the serve loop
+  lev-engine/    the facade: DTO <-> core conversions, redaction, hooks, the serve loop
   lev-metrics/   metrics scaffold: MetricSnapshot + k6-compatible metric names
   lev-cli/       the `levi` binary
 examples/smoke/ a runnable collection
@@ -60,8 +64,10 @@ cargo run -p lev-cli -- serve --stdio
 
 `levi request` sends a real `sendRequest` to an engine over the in-process transport, so
 the CLI exercises the same boundary the UI will. Output shows the resolved request
-(secrets masked), the status, a per-phase timing breakdown, and the redacted response —
-redaction happens in the engine, before anything crosses the boundary.
+(secrets masked), the status, a per-phase timing breakdown, the redacted response, any
+script `log:` lines, and the checks - redaction happens in the engine, before anything
+crosses the boundary. The command exits **1** when a check failed, which is what a CI job
+gates on.
 
 ## Development
 
@@ -78,7 +84,7 @@ CI runs fmt, clippy (`-D warnings`), tests, and `cargo-deny` (license/advisory p
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Threshold failed |
+| 1 | A check failed (thresholds, which share this code, land in Phase 3) |
 | 2 | Configuration / validation error |
 | 3 | Engine error |
 | 4 | Aborted (user or `abortOn`) |
