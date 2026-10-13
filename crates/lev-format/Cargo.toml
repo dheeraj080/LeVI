@@ -9,9 +9,12 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-lev-core = { path = "../lev-core" }
+lev-core = { version = "0.0.0", path = "../lev-core" }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_yaml_ng = "0.10.0"
+# `serde-saphyr` replaces `serde_yaml_ng`: it is pure safe Rust (no `unsafe-libyaml`,
+# which is unmaintained per RUSTSEC-2024-0449), fuzz-tested not to panic on malformed
+# input, and it emits block scalars for multi-line strings.
+serde-saphyr = "1.3.0"
 thiserror = "2.0.21"
 
 [dev-dependencies]

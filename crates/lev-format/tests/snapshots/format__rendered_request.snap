@@ -10,7 +10,7 @@ headers:
 - name: Accept
   value: application/json
 - name: X-Trace
-  value: '{{$uuid}}'
+  value: "{{$uuid}}"
 body:
   json: |
     {"id": "{{thing_id}}", "note": "{{$randomInt}}"}

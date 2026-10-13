@@ -5,8 +5,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FormatError {
-    #[error("yaml error: {0}")]
-    Yaml(#[from] serde_yaml_ng::Error),
+    #[error("yaml parse error: {0}")]
+    YamlParse(#[from] serde_saphyr::DeserializeError),
+
+    #[error("yaml render error: {0}")]
+    YamlRender(#[from] serde_saphyr::SerializeError),
 
     #[error("failed to read `{path}`: {source}")]
     Io {

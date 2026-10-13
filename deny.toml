@@ -13,6 +13,9 @@ yanked = "warn"
 [licenses]
 version = 2
 confidence-threshold = 0.9
+# Keep the allow-list broad so adding a dependency later does not require a policy edit;
+# unused entries are therefore expected and not worth a warning.
+unused-allowed-license = "allow"
 allow = [
     "MIT",
     "Apache-2.0",

@@ -5,10 +5,12 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.80"
+# Raised from 1.80 for `serde-saphyr` (the YAML parser in `lev-format`), which
+# requires 1.89. Kept honest so `rust-version` matches what we actually build with.
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 authors = ["Levi contributors"]
-repository = "https://github.com/levi/levi"
+repository = "https://github.com/dheeraj080/LeVI"
 
 [profile.release]
 lto = "fat"

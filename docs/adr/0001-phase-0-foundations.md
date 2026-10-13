@@ -12,19 +12,27 @@ foundation and are expensive to reverse later.
 
 ## Decisions
 
-### 1. On-disk format: YAML via `serde_yaml_ng`, behind a `DocumentFormat` boundary
+### 1. On-disk format: YAML via `serde-saphyr`, behind a `DocumentFormat` boundary
 
-The collection format is git-friendly plain text, one request per file. We parse it
-with `serde_yaml_ng` (an actively maintained fork with a drop-in API) but keep the
-concrete parser behind a `DocumentFormat` trait in `lev-format`, so the syntax is
-swappable without touching `lev-core`. Request bodies are stored as YAML block
-scalars (`|`), which round-trip and diff line-by-line. The on-disk syntax is pinned by
-a conformance corpus in `spec/`.
+The collection format is git-friendly plain text, one request per file. We parse it with
+`serde-saphyr` (pure safe Rust — no `unsafe`, no `unsafe-libyaml`; fuzz-tested not to
+panic on malformed input) but keep the concrete parser behind a `DocumentFormat` trait in
+`lev-format`, so the syntax is swappable without touching `lev-core`. Request bodies are
+stored as YAML block scalars (`|`), which round-trip and diff line-by-line. The on-disk
+syntax is pinned by a conformance corpus in `spec/`.
 
-*Implementation note:* `serde_yaml_ng` does **not** accept the single-key-map form for
-externally-tagged enums (it requires YAML `!tags`). Bodies therefore use an
-`#[serde(untagged)]` single-key enum (`{ json: ... }`), and auth an internally-tagged
-enum (`{ type: bearer, ... }`). Both are natural, git-friendly YAML.
+*Implementation note:* bodies use an `#[serde(untagged)]` single-key enum
+(`{ json: ... }`) and auth an internally-tagged enum (`{ type: bearer, ... }`). Both are
+natural, git-friendly YAML, and both avoid relying on YAML `!tags`, which no Serde YAML
+backend represents readably.
+
+*Superseded decision:* this originally selected `serde_yaml_ng`, which is built on
+`unsafe-libyaml`. That crate is unmaintained (RUSTSEC-2024-0449: the repository was
+archived and it is a `c2rust` translation of libyaml, so bugs will not be fixed
+upstream). Rather than suppress the advisory, the parser was swapped to `serde-saphyr`
+before the format shipped. The only observable change was the
+quote style of scalar strings (`'{{$uuid}}'` → `"{{$uuid}}"`). `serde-saphyr` requires
+Rust 1.89, so the workspace `rust-version` moved from 1.80 to 1.89.
 
 ### 2. License: `MIT OR Apache-2.0` dual
 

@@ -14,9 +14,9 @@ requests/<name>.yaml          # one request per file
 
 ## Syntax
 
-The concrete syntax is YAML, parsed with `serde_yaml_ng`, behind a `DocumentFormat`
-boundary (`lev-format`). Request bodies are stored as YAML block scalars (`|`) so they
-round-trip and diff line-by-line.
+The concrete syntax is YAML, parsed with `serde-saphyr` (pure safe Rust, fuzz-tested not
+to panic on malformed input), behind a `DocumentFormat` boundary (`lev-format`). Request
+bodies are stored as YAML block scalars (`|`) so they round-trip and diff line-by-line.
 
 ```yaml
 # collection.yaml
