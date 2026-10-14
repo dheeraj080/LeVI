@@ -1,0 +1,24 @@
+[package]
+name = "lev-load"
+description = "Levi load engine: the closed (VU) executor, the per-worker HDR metrics pipeline, and reporters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `default-features = false` drops the serialization stack (flate2/nom/base64) that the
+# default feature set pulls in; we only need the in-memory histogram and percentile math.
+hdrhistogram = { version = "7.6.0", default-features = false }
+lev-core = { version = "0.0.0", path = "../lev-core" }
+lev-http = { version = "0.0.0", path = "../lev-http" }
+lev-metrics = { version = "0.0.0", path = "../lev-metrics" }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.2", features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
+wiremock = "0.6.5"

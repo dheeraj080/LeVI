@@ -7,14 +7,16 @@ separate load-testing tool and no rewriting requests in k6 syntax: the same requ
 the same scripts, the same environment — fired once for interactive debugging, or tens
 of thousands of times per second for a load run.
 
-> **Status: Phase 2 (scripting).** The engine is built as a standalone Rust CLI first,
-> per the build plan. `levi request` works end to end *through the protocol boundary*,
-> with real HTTP, per-phase timing, and secrets redacted inside the engine; `levi serve
-> --stdio` speaks the same protocol over NDJSON. Protocol v0.2 is frozen - see
-> [`PROTOCOL.md`](PROTOCOL.md). Requests may carry JavaScript pre/post hooks and
-> declarative assertions, run in a sandboxed QuickJS runtime with a CPU budget and a
+> **Status: Phase 3 (load testing, first slice).** The engine is built as a standalone
+> Rust CLI first, per the build plan. `levi request` works end to end *through the
+> protocol boundary*, with real HTTP, per-phase timing, and secrets redacted inside the
+> engine; `levi serve --stdio` speaks the same protocol over NDJSON. Protocol v0.2 is
+> frozen - see [`PROTOCOL.md`](PROTOCOL.md). Requests may carry JavaScript pre/post hooks
+> and declarative assertions, run in a sandboxed QuickJS runtime with a CPU budget and a
 > memory limit; a runaway script fails one request and never hangs the run. `levi run`
-> and load testing land in Phase 3.
+> now drives a closed (constant-VU) load scenario and reports per-worker HDR percentiles.
+> Still to come in Phase 3: open/ramping executors, thresholds, graceful stop, more
+> reporters, and `levi selftest`.
 
 ## Layout
 
@@ -26,7 +28,8 @@ crates/
   lev-http/      the single hyper-based HTTP transport
   lev-protocol/  the wire protocol: versioned DTOs + transports (cannot see lev-core)
   lev-engine/    the facade: DTO <-> core conversions, redaction, hooks, the serve loop
-  lev-metrics/   metrics scaffold: MetricSnapshot + k6-compatible metric names
+  lev-load/      the load engine: executors, per-worker HDR metrics, reporters
+  lev-metrics/   the metric shapes: MetricSnapshot, RunReport, k6-compatible names
   lev-cli/       the `levi` binary
 examples/smoke/ a runnable collection
 spec/            the public collection-format spec + conformance corpus
@@ -55,6 +58,9 @@ export LEVI_SECRET_smoke_token=supersecret-token      # Windows: $env:LEVI_SECRE
 
 cargo run -p lev-cli -- request examples/smoke/requests/get-root.yaml --show-body
 
+# Run a load scenario against the same target
+cargo run -p lev-cli -- run examples/smoke/load/smoke.yaml --out report.json
+
 # Parse a collection directory and report every problem
 cargo run -p lev-cli -- validate examples/smoke
 
@@ -68,6 +74,13 @@ the CLI exercises the same boundary the UI will. Output shows the resolved reque
 script `log:` lines, and the checks - redaction happens in the engine, before anything
 crosses the boundary. The command exits **1** when a check failed, which is what a CI job
 gates on.
+
+`levi run` compiles a scenario against the collection, then drives it with the load
+engine: worker threads, each running a pool of virtual users, feeding per-worker HDR
+histograms that the aggregator merges four times a second. It prints requests, failures,
+throughput, and latency percentiles, and writes the same numbers as JSON with `--out`.
+The scenario format is in [`spec/README.md`](spec/README.md); the design is in
+[`docs/adr/0004-phase-3-load-spine.md`](docs/adr/0004-phase-3-load-spine.md).
 
 ## Development
 
@@ -84,7 +97,7 @@ CI runs fmt, clippy (`-D warnings`), tests, and `cargo-deny` (license/advisory p
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | A check failed (thresholds, which share this code, land in Phase 3) |
+| 1 | A check or threshold failed (thresholds land in a later Phase 3 slice) |
 | 2 | Configuration / validation error |
 | 3 | Engine error |
 | 4 | Aborted (user or `abortOn`) |

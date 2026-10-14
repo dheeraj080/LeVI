@@ -203,6 +203,63 @@ pub struct VarsFileDto {
     pub vars: BTreeMap<String, VarValueDto>,
 }
 
+/// A duration in the on-disk format.
+///
+/// `"30s"`, `"500ms"`, `"2m"`, `"1h"` — or a bare number, which is read as seconds.
+/// A unit is the readable form and is what the writer emits; the bare number exists so
+/// `duration: 30` is not a surprising parse error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DurationDto {
+    Text(String),
+    Seconds(u64),
+}
+
+/// The `executor` block: how the scenario drives load.
+///
+/// ```yaml
+/// executor:
+///   constantVus: { vus: 10, duration: 30s }
+/// ```
+///
+/// A struct with optional variants rather than an untagged enum, so an unknown or
+/// missing executor produces a clear "no executor configured" error instead of an
+/// opaque untagged-deserialization failure. Later slices add `rampingVus` /
+/// `constantRate` here without touching the shape of a scenario.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constant_vus: Option<ConstantVusDto>,
+}
+
+/// A fixed pool of virtual users run for a fixed duration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConstantVusDto {
+    pub vus: u32,
+    pub duration: DurationDto,
+}
+
+/// One step: a request id, and the pause that follows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StepDto {
+    pub request: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think_time: Option<DurationDto>,
+}
+
+/// `load/flows/*.yaml` — a load scenario.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioDto {
+    pub id: String,
+    pub name: String,
+    pub executor: ExecutorDto,
+    pub steps: Vec<StepDto>,
+}
+
 fn default_method() -> String {
     "GET".to_string()
 }

@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Levi metrics — **Phase 1 scaffold**.
+//! Levi metrics: the *shape* of the numbers the UI and reports consume.
 //!
-//! This crate fixes the *shape* of the metrics the UI will consume: the k6-compatible
-//! metric names (§4.5), the run lifecycle states (§4.10), and [`MetricSnapshot`], the
-//! aggregate the engine emits at 4 Hz.
+//! This crate fixes the k6-compatible metric names (§4.5), the run lifecycle states
+//! (§4.10), the 4 Hz [`MetricSnapshot`] the aggregator emits, and the final
+//! [`RunReport`].
 //!
 //! It is deliberately dependency-free and does **not** depend on `lev-core`: nothing
-//! here is a domain type. The per-worker HDR histograms, the double-buffered flush,
-//! and the aggregator land in Phase 3, at which point this crate grows into the real
-//! pipeline. Until then it exists so the protocol and the UI can agree on names early.
+//! here is a domain type, and nothing here serializes. The per-worker HDR histograms,
+//! the double-buffered flush, the aggregator, and the reporters live in `lev-load`,
+//! which fills these structs in and owns turning a [`RunReport`] into JSON. Keeping
+//! this crate plain data means the CLI, the protocol, and any future UI can all agree
+//! on names without pulling in a histogram.
 //!
-//! What is deliberately *not* here yet: histograms, percentiles computed from samples,
+//! What is deliberately *not* here: histograms, percentiles computed from samples,
 //! threshold evaluation, and reporters.
 
 #![forbid(unsafe_code)]
@@ -68,6 +70,27 @@ impl RunState {
     }
 }
 
+/// How a finished run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The run reached its planned duration.
+    Completed,
+    /// The run was stopped early, by the user or by `abortOn`.
+    Aborted,
+    /// The run failed before it could complete: an engine or generator fault.
+    Errored,
+}
+
+impl RunOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunOutcome::Completed => "completed",
+            RunOutcome::Aborted => "aborted",
+            RunOutcome::Errored => "errored",
+        }
+    }
+}
+
 /// Percentiles of a latency distribution, in the units recorded.
 ///
 /// `None` means "no samples yet" rather than "0", so a UI can distinguish an empty
@@ -98,7 +121,8 @@ pub struct MetricSnapshot {
     pub elapsed: Duration,
     /// `http_reqs`: every request dispatched.
     pub http_reqs: u64,
-    /// `http_req_failed`: requests the target rejected at the transport level.
+    /// `http_req_failed`: requests that did not succeed — a transport-level failure
+    /// (DNS, connect, TLS, reset) or a response with a 4xx/5xx status.
     pub http_req_failed: u64,
     /// `iterations`: completed scenario iterations.
     pub iterations: u64,
@@ -138,6 +162,46 @@ impl MetricSnapshot {
     }
 }
 
+/// The final report for a finished run.
+///
+/// Plain data: no `serde` here, and no histogram — `lev-load` computes the percentiles
+/// from the merged HDR and fills in [`LatencySummary`], then a reporter serializes it.
+/// `started_at_unix_ms` is the *only* wall-clock value; everything measured uses a
+/// monotonic clock, so a clock adjustment mid-run cannot corrupt the numbers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunReport {
+    pub run_id: RunId,
+    pub outcome: RunOutcome,
+    /// Unix milliseconds at which the run started (wall clock, for report timestamps).
+    pub started_at_unix_ms: u64,
+    /// The duration the executor planned to run for.
+    pub planned_duration: Duration,
+    /// The run's actual wall-clock duration.
+    pub duration: Duration,
+    /// The peak number of virtual users that were in flight.
+    pub max_vus: u32,
+    pub http_reqs: u64,
+    pub http_req_failed: u64,
+    pub iterations: u64,
+    pub checks: u64,
+    pub checks_failed: u64,
+    pub script_errors: u64,
+    pub scheduler_lag: Duration,
+    pub latency: LatencySummary,
+}
+
+impl RunReport {
+    /// Mean requests per second over the run.
+    pub fn requests_per_second(&self) -> f64 {
+        let seconds = self.duration.as_secs_f64();
+        if seconds > 0.0 {
+            self.http_reqs as f64 / seconds
+        } else {
+            0.0
+        }
+    }
+}
+
 /// The k6-compatible metric names we commit to (§4.5).
 ///
 /// Using k6's names is a deliberate adoption move: existing Grafana dashboards and
@@ -162,12 +226,12 @@ pub mod metric_names {
     pub const MAX_VUS_HIT: &str = "max_vus_hit";
 }
 
-/// A placeholder aggregator.
+/// The run-level aggregator.
 ///
-/// Phase 1 keeps only counters and sequence numbering; Phase 3 replaces the latency
-/// fields with per-worker HDR histograms merged at flush time. It is intentionally
-/// single-threaded (`&mut self`): the per-worker-atomic design arrives with the
-/// workers.
+/// The load engine's aggregator feeds it *deltas* every flush (per-worker counters are
+/// reset by the swap), and sets the run-level [`LatencySummary`] computed from the
+/// merged HDR. It stays single-threaded (`&mut self`): the per-worker atomics and
+/// histograms live in `lev-load`, which owns the worker threads.
 #[derive(Debug, Default)]
 pub struct MetricsRecorder {
     seq: u64,
@@ -178,6 +242,8 @@ pub struct MetricsRecorder {
     checks_failed: u64,
     script_errors: u64,
     vus: u32,
+    max_vus: u32,
+    latency: LatencySummary,
 }
 
 impl MetricsRecorder {
@@ -185,12 +251,18 @@ impl MetricsRecorder {
         Self::default()
     }
 
-    /// Record one dispatched request, and whether it failed at the transport level.
+    /// Record one dispatched request, and whether it failed.
     pub fn record_request(&mut self, failed: bool) {
-        self.http_reqs += 1;
-        if failed {
-            self.http_req_failed += 1;
-        }
+        self.record_requests(1, u64::from(failed));
+    }
+
+    /// Record a batch of dispatched requests and how many of them failed.
+    ///
+    /// The load engine aggregates per flush, so it never calls the singular form on
+    /// the hot path.
+    pub fn record_requests(&mut self, total: u64, failed: u64) {
+        self.http_reqs += total;
+        self.http_req_failed += failed.min(total);
     }
 
     /// Record completed iterations.
@@ -212,11 +284,20 @@ impl MetricsRecorder {
     /// Set the active virtual-user count at the sample point.
     pub fn set_vus(&mut self, vus: u32) {
         self.vus = vus;
+        self.max_vus = self.max_vus.max(vus);
+    }
+
+    /// Set the run-level latency summary, computed from the merged HDR.
+    pub fn set_latency(&mut self, latency: LatencySummary) {
+        self.latency = latency;
+    }
+
+    /// The peak active virtual-user count seen so far.
+    pub fn max_vus(&self) -> u32 {
+        self.max_vus
     }
 
     /// Produce the next snapshot, advancing the sequence number.
-    ///
-    /// Latency is left empty until the histogram lands in Phase 3.
     pub fn snapshot(&mut self, elapsed: Duration, scheduler_lag: Duration) -> MetricSnapshot {
         self.seq += 1;
         MetricSnapshot {
@@ -230,7 +311,7 @@ impl MetricsRecorder {
             script_errors: self.script_errors,
             vus: self.vus,
             scheduler_lag,
-            latency: LatencySummary::default(),
+            latency: self.latency,
         }
     }
 }
@@ -307,5 +388,67 @@ mod tests {
         assert_eq!(metric_names::CHECKS_FAILED, "checks_failed");
         assert_eq!(metric_names::SCRIPT_ERRORS, "script_errors");
         assert_eq!(metric_names::VUS, "vus");
+    }
+
+    #[test]
+    fn batched_counters_and_latency_reach_the_snapshot() {
+        let mut recorder = MetricsRecorder::new();
+        recorder.record_requests(1000, 7);
+        recorder.record_iterations(250);
+        recorder.set_vus(10);
+        recorder.set_vus(3);
+        recorder.set_latency(LatencySummary {
+            p50: Some(Duration::from_millis(12)),
+            p90: None,
+            p95: None,
+            p99: Some(Duration::from_millis(80)),
+        });
+
+        let snapshot = recorder.snapshot(Duration::from_secs(1), Duration::ZERO);
+        assert_eq!(snapshot.http_reqs, 1000);
+        assert_eq!(snapshot.http_req_failed, 7);
+        assert_eq!(snapshot.iterations, 250);
+        // `vus` is the *active* count at the sample point; `max_vus` remembers the peak.
+        assert_eq!(snapshot.vus, 3);
+        assert_eq!(recorder.max_vus(), 10);
+        assert_eq!(snapshot.latency.p50, Some(Duration::from_millis(12)));
+        assert_eq!(snapshot.latency.p99, Some(Duration::from_millis(80)));
+
+        // A later snapshot carries the same cumulative latency and counters.
+        let next = recorder.snapshot(Duration::from_secs(2), Duration::ZERO);
+        assert_eq!(next.http_reqs, 1000);
+        assert_eq!(next.latency.p50, Some(Duration::from_millis(12)));
+    }
+
+    #[test]
+    fn failed_requests_never_exceed_the_total() {
+        let mut recorder = MetricsRecorder::new();
+        // Defensive: a bad delta cannot make failures outnumber requests.
+        recorder.record_requests(3, 5);
+        let snapshot = recorder.snapshot(Duration::from_secs(1), Duration::ZERO);
+        assert_eq!(snapshot.http_reqs, 3);
+        assert_eq!(snapshot.http_req_failed, 3);
+    }
+
+    #[test]
+    fn a_run_report_computes_requests_per_second() {
+        let report = RunReport {
+            run_id: RunId::new("r1"),
+            outcome: RunOutcome::Completed,
+            started_at_unix_ms: 0,
+            planned_duration: Duration::from_secs(10),
+            duration: Duration::from_secs(10),
+            max_vus: 10,
+            http_reqs: 5000,
+            http_req_failed: 1,
+            iterations: 500,
+            checks: 0,
+            checks_failed: 0,
+            script_errors: 0,
+            scheduler_lag: Duration::from_millis(2),
+            latency: LatencySummary::default(),
+        };
+        assert!((report.requests_per_second() - 500.0).abs() < f64::EPSILON);
+        assert_eq!(RunOutcome::Completed.as_str(), "completed");
     }
 }

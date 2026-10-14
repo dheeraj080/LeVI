@@ -10,6 +10,7 @@ plain text, one request per file. This directory holds the specification and the
 collection.yaml               # id, name, vars, auth defaults, baseUrl
 environments/<env>.yaml       # an overlay of vars
 requests/<name>.yaml          # one request per file
+load/<name>.yaml              # a load scenario: executor + steps
 ```
 
 ## Syntax
@@ -121,6 +122,42 @@ assertions:
 A **check** is one assertion or one `lev.test(...)` outcome. A failed check is not a
 request failure — the response is still returned — but `levi request` reports the checks
 and exits **1** when any failed, which is what a CI job gates on.
+
+## Load scenarios
+
+A scenario lives beside the requests it drives — conventionally `load/<name>.yaml` — and
+declares *what to run and how hard*, never *how to make the request* (that stays in the
+request file):
+
+```yaml
+# load/checkout.yaml
+id: checkout
+name: Checkout flow
+executor:
+  constantVus:            # a fixed pool of virtual users
+    vus: 50
+    duration: 30s
+steps:                    # run in order, once per iteration
+  - request: create-order
+    thinkTime: 1s
+  - request: get-order
+```
+
+- **`executor`** selects the load model. Only `constantVus` exists today: a closed model
+  (a fixed number of virtual users, each looping its steps) for a fixed `duration`.
+  Open/ramping models are a later slice.
+- **`steps`** is an ordered list. `request` is the `id` of a request in
+  `requests/`; `thinkTime` (optional) is the pause after that step.
+- A **duration** is `250ms`, `30s`, `2m`, `1h`, or a bare number read as seconds.
+
+Running it prints a summary and (with `--out`) writes a JSON report:
+
+```
+levi run load/checkout.yaml --env dev --workers 8 --seed 1 --out report.json
+```
+
+A completed run exits `0`. Thresholds — and therefore exit code `1` for a failed one —
+arrive in a later slice; a configuration error is `2` and an engine error is `3`.
 
 ## Conformance corpus
 

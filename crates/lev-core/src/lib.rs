@@ -14,6 +14,7 @@ pub mod error;
 pub mod model;
 pub mod prepare;
 pub mod redact;
+pub mod scenario;
 pub mod secrets;
 pub mod template;
 
@@ -23,7 +24,10 @@ pub use error::{CoreError, Result};
 pub use model::{
     ApiKeyLocation, Auth, Body, Collection, Id, Method, RequestDef, Scripts, VarSet, VarValue,
 };
-pub use prepare::{prepare_request, prepare_request_with_seed, PreparedRequest};
+pub use prepare::{
+    compile_request, prepare_request, prepare_request_with_seed, CompiledRequest, PreparedRequest,
+};
 pub use redact::{Redactor, MASK};
+pub use scenario::{Executor, Scenario, Step};
 pub use secrets::{MapSecretStore, Secret, SecretName, SecretStore};
 pub use template::{DynamicFunctions, RenderContext, Template};

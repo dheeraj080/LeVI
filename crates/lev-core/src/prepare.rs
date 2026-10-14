@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Turn a [`Collection`] + [`RequestDef`] + variable scope into a fully resolved
 //! request that a transport can send. Pure: no I/O, so it is trivially testable.
+//!
+//! The work is split in two so the load path stays cheap:
+//!
+//! 1. [`compile_request`] parses every template **once** into a [`CompiledRequest`].
+//!    This is scope-independent, so it happens during `Preparing`.
+//! 2. [`CompiledRequest::prepare`] renders the parsed templates against a [`Context`].
+//!    This is the per-iteration work, and the only part that touches the scope.
+//!
+//! [`prepare_request`] is the one-shot convenience the interactive path uses: it
+//! compiles and renders in a single call, so both paths share exactly one resolver.
+//! Body templates (`json`, `raw`) are the reason the split exists at all: they are
+//! stored as source text, and re-parsing them on every iteration at 10k RPS is real
+//! overhead. A long-lived [`Context`] also means the dynamic functions
+//! (`{{$uuid}}`, `{{$randomInt}}`) keep advancing instead of repeating themselves.
 
 use base64::Engine as _;
 
@@ -17,6 +31,111 @@ pub struct PreparedRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+/// A request whose templates have been parsed once, ready to render many times.
+///
+/// Compiling depends only on the collection and the request — never on the variable
+/// scope — so it is safe to compile once and render per iteration. Renderers are
+/// cheap: every template walk is linear and nothing is re-parsed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledRequest {
+    method: Method,
+    base_url: Option<Template>,
+    url: Template,
+    headers: Vec<(Template, Template)>,
+    body: CompiledBody,
+    auth: Option<CompiledAuth>,
+}
+
+/// A request body with its templates parsed. Mirrors [`Body`], with the source text
+/// of `json` / `raw` / `file` replaced by a parsed [`Template`].
+#[derive(Debug, Clone, PartialEq)]
+enum CompiledBody {
+    None,
+    Json(Template),
+    Form(Vec<(String, String)>),
+    Raw {
+        content_type: Option<String>,
+        content: Template,
+    },
+    File(Template),
+}
+
+/// Auth with its templates parsed. The `VarValue` fields are resolved at render time
+/// through the [`Context`], so the secret store is still the only source of values.
+#[derive(Debug, Clone, PartialEq)]
+enum CompiledAuth {
+    Bearer(Template),
+    Basic {
+        username: Template,
+        password: VarValue,
+    },
+    ApiKey {
+        name: String,
+        value: VarValue,
+        location: ApiKeyLocation,
+    },
+}
+
+/// Parse every template in a request once.
+///
+/// Auth falls back to the collection default exactly as [`prepare_request`] does, so
+/// the two paths cannot disagree about which credentials apply.
+pub fn compile_request(collection: &Collection, request: &RequestDef) -> Result<CompiledRequest> {
+    Ok(CompiledRequest {
+        method: request.method.clone(),
+        base_url: collection.base_url.clone(),
+        url: request.url.clone(),
+        headers: request.headers.clone(),
+        body: compile_body(&request.body)?,
+        auth: request
+            .auth
+            .as_ref()
+            .or(collection.auth.as_ref())
+            .map(compile_auth),
+    })
+}
+
+impl CompiledRequest {
+    /// Render the parsed templates against a context.
+    pub fn prepare(&self, ctx: &mut Context<'_>) -> Result<PreparedRequest> {
+        let base = match &self.base_url {
+            Some(template) => Some(template.render(ctx)?),
+            None => None,
+        };
+        let rendered = self.url.render(ctx)?;
+        let mut url = join_url(base.as_deref(), &rendered)?;
+
+        let mut headers: Vec<(String, String)> = Vec::with_capacity(self.headers.len() + 2);
+        for (name, value) in &self.headers {
+            headers.push((name.render(ctx)?, value.render(ctx)?));
+        }
+
+        let (body, default_content_type) = self.body.render(ctx)?;
+
+        if let Some(auth) = &self.auth {
+            auth.apply(ctx, &mut headers, &mut url)?;
+        }
+
+        if let Some(content_type) = default_content_type {
+            if !has_header(&headers, "content-type") {
+                headers.push(("content-type".to_string(), content_type));
+            }
+        }
+
+        Ok(PreparedRequest {
+            method: self.method.clone(),
+            url,
+            headers,
+            body,
+        })
+    }
+
+    /// The HTTP method, without rendering.
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
 }
 
 /// Resolve a request with the default RNG seed.
@@ -37,112 +156,114 @@ pub fn prepare_request_with_seed(
     secrets: &dyn SecretStore,
     seed: u64,
 ) -> Result<PreparedRequest> {
+    let compiled = compile_request(collection, request)?;
     let mut ctx = Context::with_seed(vars, secrets, seed);
-
-    let base = match &collection.base_url {
-        Some(template) => Some(template.render(&mut ctx)?),
-        None => None,
-    };
-    let rendered = request.url.render(&mut ctx)?;
-    let mut url = join_url(base.as_deref(), &rendered)?;
-
-    let mut headers: Vec<(String, String)> = Vec::with_capacity(request.headers.len() + 2);
-    for (name, value) in &request.headers {
-        headers.push((name.render(&mut ctx)?, value.render(&mut ctx)?));
-    }
-
-    let (body, default_content_type) = render_body(&request.body, &mut ctx)?;
-
-    if let Some(auth) = request.auth.as_ref().or(collection.auth.as_ref()) {
-        apply_auth(auth, secrets, &mut ctx, &mut headers, &mut url)?;
-    }
-
-    if let Some(content_type) = default_content_type {
-        if !has_header(&headers, "content-type") {
-            headers.push(("content-type".to_string(), content_type));
-        }
-    }
-
-    Ok(PreparedRequest {
-        method: request.method.clone(),
-        url,
-        headers,
-        body,
-    })
+    compiled.prepare(&mut ctx)
 }
 
-fn render_body(body: &Body, ctx: &mut Context<'_>) -> Result<(Vec<u8>, Option<String>)> {
-    match body {
-        Body::None => Ok((Vec::new(), None)),
-        Body::Json(source) => {
-            let rendered = Template::parse(source)?.render(ctx)?;
-            Ok((rendered.into_bytes(), Some("application/json".to_string())))
-        }
+fn compile_body(body: &Body) -> Result<CompiledBody> {
+    Ok(match body {
+        Body::None => CompiledBody::None,
+        Body::Json(source) => CompiledBody::Json(Template::parse(source)?),
+        Body::Form(fields) => CompiledBody::Form(fields.clone()),
         Body::Raw {
             content_type,
             content,
-        } => {
-            let rendered = Template::parse(content)?.render(ctx)?;
-            Ok((rendered.into_bytes(), content_type.clone()))
-        }
-        Body::Form(fields) => {
-            let encoded = fields
-                .iter()
-                .map(|(name, value)| format!("{}={}", form_encode(name), form_encode(value)))
-                .collect::<Vec<_>>()
-                .join("&");
-            Ok((
-                encoded.into_bytes(),
-                Some("application/x-www-form-urlencoded".to_string()),
-            ))
-        }
-        Body::File(template) => {
-            let reference = template.render(ctx)?;
-            Err(CoreError::UnsupportedBody(format!(
-                "file body `{reference}` must be resolved by a layer that can do I/O"
-            )))
-        }
-    }
+        } => CompiledBody::Raw {
+            content_type: content_type.clone(),
+            content: Template::parse(content)?,
+        },
+        Body::File(template) => CompiledBody::File(template.clone()),
+    })
 }
 
-fn apply_auth(
-    auth: &Auth,
-    secrets: &dyn SecretStore,
-    ctx: &mut Context<'_>,
-    headers: &mut Vec<(String, String)>,
-    url: &mut String,
-) -> Result<()> {
+fn compile_auth(auth: &Auth) -> CompiledAuth {
     match auth {
-        Auth::Bearer(token) => {
-            let token = token.render(ctx)?;
-            headers.push(("authorization".to_string(), format!("Bearer {token}")));
-        }
-        Auth::Basic { username, password } => {
-            let user = username.render(ctx)?;
-            let pass = resolve_value(password, secrets)?;
-            let encoded =
-                base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-            headers.push(("authorization".to_string(), format!("Basic {encoded}")));
-        }
+        Auth::Bearer(token) => CompiledAuth::Bearer(token.clone()),
+        Auth::Basic { username, password } => CompiledAuth::Basic {
+            username: username.clone(),
+            password: password.clone(),
+        },
         Auth::ApiKey {
             name,
             value,
             location,
-        } => {
-            let value = resolve_value(value, secrets)?;
-            match location {
-                ApiKeyLocation::Header => headers.push((name.clone(), value)),
-                ApiKeyLocation::Query => append_query(url, name, &value),
+        } => CompiledAuth::ApiKey {
+            name: name.clone(),
+            value: value.clone(),
+            location: *location,
+        },
+    }
+}
+
+impl CompiledBody {
+    fn render(&self, ctx: &mut Context<'_>) -> Result<(Vec<u8>, Option<String>)> {
+        match self {
+            CompiledBody::None => Ok((Vec::new(), None)),
+            CompiledBody::Json(template) => {
+                let rendered = template.render(ctx)?;
+                Ok((rendered.into_bytes(), Some("application/json".to_string())))
+            }
+            CompiledBody::Raw {
+                content_type,
+                content,
+            } => {
+                let rendered = content.render(ctx)?;
+                Ok((rendered.into_bytes(), content_type.clone()))
+            }
+            CompiledBody::Form(fields) => {
+                let encoded = fields
+                    .iter()
+                    .map(|(name, value)| format!("{}={}", form_encode(name), form_encode(value)))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                Ok((
+                    encoded.into_bytes(),
+                    Some("application/x-www-form-urlencoded".to_string()),
+                ))
+            }
+            CompiledBody::File(template) => {
+                let reference = template.render(ctx)?;
+                Err(CoreError::UnsupportedBody(format!(
+                    "file body `{reference}` must be resolved by a layer that can do I/O"
+                )))
             }
         }
     }
-    Ok(())
 }
 
-fn resolve_value(value: &VarValue, secrets: &dyn SecretStore) -> Result<String> {
-    match value {
-        VarValue::Plain(value) => Ok(value.clone()),
-        VarValue::Secret(name) => Ok(secrets.resolve(name)?.expose().to_string()),
+impl CompiledAuth {
+    fn apply(
+        &self,
+        ctx: &mut Context<'_>,
+        headers: &mut Vec<(String, String)>,
+        url: &mut String,
+    ) -> Result<()> {
+        match self {
+            CompiledAuth::Bearer(token) => {
+                let token = token.render(ctx)?;
+                headers.push(("authorization".to_string(), format!("Bearer {token}")));
+            }
+            CompiledAuth::Basic { username, password } => {
+                let user = username.render(ctx)?;
+                let pass = ctx.resolve_value(password)?;
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+                headers.push(("authorization".to_string(), format!("Basic {encoded}")));
+            }
+            CompiledAuth::ApiKey {
+                name,
+                value,
+                location,
+            } => {
+                let value = ctx.resolve_value(value)?;
+                match location {
+                    ApiKeyLocation::Header => headers.push((name.clone(), value)),
+                    ApiKeyLocation::Query => append_query(url, name, &value),
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -394,5 +515,48 @@ mod tests {
         });
         let result = prepare_request(&collection(None), &req, vars(&[]), &store);
         assert!(matches!(result, Err(CoreError::SecretNotFound(_))));
+    }
+
+    #[test]
+    fn compiling_then_rendering_matches_the_one_shot_path() {
+        let store = MapSecretStore::new();
+        let collection = collection(Some("https://api.test"));
+        let mut req = request("/orders/{{id}}");
+        req.method = Method::Post;
+        req.body = Body::Json("{\"sku\":\"{{sku}}\"}".to_string());
+        req.auth = Some(Auth::Bearer(Template::parse("{{token}}").unwrap()));
+        let scope = vars(&[("id", "7"), ("sku", "A1"), ("token", "abc")]);
+
+        let one_shot =
+            prepare_request_with_seed(&collection, &req, scope.clone(), &store, 5).unwrap();
+
+        let compiled = compile_request(&collection, &req).unwrap();
+        let mut ctx = Context::with_seed(scope, &store, 5);
+        let two_step = compiled.prepare(&mut ctx).unwrap();
+
+        assert_eq!(one_shot, two_step);
+    }
+
+    #[test]
+    fn a_long_lived_context_advances_dynamic_functions() {
+        let store = MapSecretStore::new();
+        let collection = collection(None);
+        let req = request("https://api.test/{{$uuid}}");
+        let compiled = compile_request(&collection, &req).unwrap();
+
+        // The load path renders the same request many times against one context; the
+        // seeded RNG must keep advancing, or every iteration would send the same uuid.
+        let mut ctx = Context::with_seed(vars(&[]), &store, 9);
+        let first = compiled.prepare(&mut ctx).unwrap();
+        let second = compiled.prepare(&mut ctx).unwrap();
+        assert_ne!(first.url, second.url);
+    }
+
+    #[test]
+    fn compile_reports_a_body_template_error_once() {
+        let mut req = request("https://api.test/orders");
+        req.body = Body::Json("{\"sku\": \"{{ oops\"".to_string());
+        let result = compile_request(&collection(None), &req);
+        assert!(matches!(result, Err(CoreError::TemplateParse { .. })));
     }
 }

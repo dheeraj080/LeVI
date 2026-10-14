@@ -14,8 +14,9 @@ mod yaml;
 
 use std::path::Path;
 
-use lev_core::{Collection, RequestDef, VarSet};
+use lev_core::{Collection, RequestDef, Scenario, VarSet};
 
+pub use convert::{format_duration, parse_duration};
 pub use error::FormatError;
 pub use yaml::Yaml;
 
@@ -28,6 +29,9 @@ pub trait DocumentFormat {
     fn collection_to_string(&self, collection: &Collection) -> Result<String, FormatError>;
 
     fn vars_from_str(&self, source: &str) -> Result<VarSet, FormatError>;
+
+    fn scenario_from_str(&self, source: &str) -> Result<Scenario, FormatError>;
+    fn scenario_to_string(&self, scenario: &Scenario) -> Result<String, FormatError>;
 }
 
 pub fn load_collection(
@@ -46,6 +50,11 @@ pub fn load_request(format: &dyn DocumentFormat, path: &Path) -> Result<RequestD
 pub fn load_vars(format: &dyn DocumentFormat, path: &Path) -> Result<VarSet, FormatError> {
     let source = read(path)?;
     format.vars_from_str(&source)
+}
+
+pub fn load_scenario(format: &dyn DocumentFormat, path: &Path) -> Result<Scenario, FormatError> {
+    let source = read(path)?;
+    format.scenario_from_str(&source)
 }
 
 pub fn save_collection(

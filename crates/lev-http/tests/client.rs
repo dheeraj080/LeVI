@@ -110,3 +110,24 @@ async fn a_bad_url_is_reported_as_an_error() {
         .unwrap_err();
     assert!(matches!(error, lev_http::HttpError::InvalidUrl(_)));
 }
+
+#[tokio::test]
+async fn discarding_a_body_still_counts_it() {
+    let address = start_echo_server().await;
+    let client = HttpClient::new().unwrap();
+
+    // The load path never keeps the body, but it must still read it (so the pooled
+    // connection stays healthy) and report its true length.
+    let prepared = request(
+        Method::Post,
+        format!("http://{address}/orders"),
+        b"{\"sku\":\"A1\"}".to_vec(),
+    );
+    let expected_len = client.send(prepared.clone()).await.unwrap().body.len() as u64;
+
+    let response = client.send_discarding(prepared).await.unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body_len, expected_len);
+    assert!(response.body_len > 0);
+    assert!(response.timings.total >= response.timings.ttfb);
+}

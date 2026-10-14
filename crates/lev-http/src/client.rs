@@ -2,8 +2,13 @@
 //! The single HTTP client used by both the interactive and load paths.
 //!
 //! Built on `hyper_util`'s pooled legacy client with a `rustls` connector, so the
-//! request you send once is the request you send 50,000 times. Bodies are read into
-//! memory here for interactive use; load mode will discard them (Phase 3).
+//! request you send once is the request you send 50,000 times.
+//!
+//! The two paths differ in exactly one place: [`HttpClient::send`] buffers the
+//! response body (interactive), while [`HttpClient::send_discarding`] streams it and
+//! keeps only the byte count (load mode). Buffering bodies in a load run is the
+//! number-one memory bug in naive load tools, so the load path cannot do it by
+//! accident — it does not have a buffering call to reach for.
 
 use std::time::Instant;
 
@@ -29,13 +34,23 @@ pub struct HttpClient {
     client: Client<Connector, RequestBody>,
 }
 
-/// A fully buffered response, with timing.
+/// A fully buffered response, with timing. Interactive path only.
 #[derive(Debug, Clone)]
 pub struct Response {
     pub status: u16,
     pub version: String,
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
+    pub timings: Timings,
+}
+
+/// A load-mode response: the status and body length, never the body.
+///
+/// The body is streamed and counted so the connection can be reused, then dropped.
+#[derive(Debug, Clone)]
+pub struct LoadResponse {
+    pub status: u16,
+    pub body_len: u64,
     pub timings: Timings,
 }
 
@@ -55,20 +70,7 @@ impl HttpClient {
 
     /// Send a resolved request and buffer the response.
     pub async fn send(&self, request: PreparedRequest) -> Result<Response, HttpError> {
-        let uri = request
-            .url
-            .parse::<hyper::Uri>()
-            .map_err(|_| HttpError::InvalidUrl(request.url.clone()))?;
-        let method = hyper::Method::from_bytes(request.method.as_str().as_bytes())
-            .map_err(|_| HttpError::InvalidMethod(request.method.as_str().to_string()))?;
-
-        let mut builder = Request::builder().method(method).uri(uri);
-        for (name, value) in &request.headers {
-            builder = builder.header(name.as_str(), value.as_str());
-        }
-        let outgoing = builder
-            .body(Full::new(Bytes::from(request.body)))
-            .map_err(|error| HttpError::InvalidHeader(error.to_string()))?;
+        let outgoing = build_request(request)?;
 
         let start = Instant::now();
         let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
@@ -98,20 +100,67 @@ impl HttpClient {
             version: format!("{:?}", parts.version),
             headers,
             body,
-            timings: Timings {
-                total,
-                ttfb,
-                receive: total.saturating_sub(ttfb),
-                dns: None,
-                connect: None,
-                tls: None,
-            },
+            timings: timings_since(ttfb, total),
+        })
+    }
+
+    /// Send a resolved request, counting and discarding the response body.
+    ///
+    /// This is the load path: the body is read to keep the connection healthy, but
+    /// only its length is kept, so memory does not scale with response size.
+    pub async fn send_discarding(
+        &self,
+        request: PreparedRequest,
+    ) -> Result<LoadResponse, HttpError> {
+        let outgoing = build_request(request)?;
+
+        let start = Instant::now();
+        let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
+        let ttfb = start.elapsed();
+
+        let (parts, mut incoming) = response.into_parts();
+        let mut body_len: u64 = 0;
+        while let Some(frame) = incoming.frame().await {
+            let frame = frame.map_err(|error| HttpError::Body(error.to_string()))?;
+            if let Some(chunk) = frame.data_ref() {
+                body_len += chunk.len() as u64;
+            }
+        }
+        let total = start.elapsed();
+
+        Ok(LoadResponse {
+            status: parts.status.as_u16(),
+            body_len,
+            timings: timings_since(ttfb, total),
         })
     }
 }
 
-impl Default for HttpClient {
-    fn default() -> Self {
-        Self::new().expect("failed to build the default HTTP client")
+/// Turn a prepared request into a hyper request. Shared by both send paths.
+fn build_request(request: PreparedRequest) -> Result<Request<RequestBody>, HttpError> {
+    let uri = request
+        .url
+        .parse::<hyper::Uri>()
+        .map_err(|_| HttpError::InvalidUrl(request.url.clone()))?;
+    let method = hyper::Method::from_bytes(request.method.as_str().as_bytes())
+        .map_err(|_| HttpError::InvalidMethod(request.method.as_str().to_string()))?;
+
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    builder
+        .body(Full::new(Bytes::from(request.body)))
+        .map_err(|error| HttpError::InvalidHeader(error.to_string()))
+}
+
+fn timings_since(ttfb: std::time::Duration, total: std::time::Duration) -> Timings {
+    Timings {
+        total,
+        ttfb,
+        receive: total.saturating_sub(ttfb),
+        dns: None,
+        connect: None,
+        tls: None,
     }
 }

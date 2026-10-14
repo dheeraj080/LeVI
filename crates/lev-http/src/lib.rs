@@ -10,6 +10,6 @@ mod client;
 pub mod error;
 pub mod timing;
 
-pub use client::{HttpClient, Response};
+pub use client::{HttpClient, LoadResponse, Response};
 pub use error::HttpError;
 pub use timing::Timings;

@@ -31,6 +31,18 @@ impl<'a> Context<'a> {
     pub fn vars(&self) -> &VarSet {
         &self.vars
     }
+
+    /// Resolve a [`VarValue`] that is stored inline (not under a variable name):
+    /// a literal, or a secret read from the store.
+    ///
+    /// Auth fields carry their value this way rather than by variable name, so this
+    /// is the one place a `Secret` is turned into text during preparation.
+    pub fn resolve_value(&self, value: &VarValue) -> Result<String> {
+        match value {
+            VarValue::Plain(value) => Ok(value.clone()),
+            VarValue::Secret(name) => Ok(self.secrets.resolve(name)?.expose().to_string()),
+        }
+    }
 }
 
 impl RenderContext for Context<'_> {

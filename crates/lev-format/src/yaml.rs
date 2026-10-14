@@ -4,10 +4,10 @@
 //! The parser is deliberately isolated here so the concrete syntax can change
 //! without touching `lev-core` or the rest of the app.
 
-use lev_core::{Collection, RequestDef, VarSet};
+use lev_core::{Collection, RequestDef, Scenario, VarSet};
 
 use crate::convert;
-use crate::dto::{CollectionDto, RequestDto, VarsFileDto};
+use crate::dto::{CollectionDto, RequestDto, ScenarioDto, VarsFileDto};
 use crate::error::FormatError;
 use crate::DocumentFormat;
 
@@ -39,5 +39,15 @@ impl DocumentFormat for Yaml {
     fn vars_from_str(&self, source: &str) -> Result<VarSet, FormatError> {
         let dto: VarsFileDto = serde_saphyr::from_str(source)?;
         convert::vars_to_core(dto.vars)
+    }
+
+    fn scenario_from_str(&self, source: &str) -> Result<Scenario, FormatError> {
+        let dto: ScenarioDto = serde_saphyr::from_str(source)?;
+        convert::scenario_to_core(dto)
+    }
+
+    fn scenario_to_string(&self, scenario: &Scenario) -> Result<String, FormatError> {
+        let dto = convert::scenario_from_core(scenario);
+        Ok(serde_saphyr::to_string(&dto)?)
     }
 }

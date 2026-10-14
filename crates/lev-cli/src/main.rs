@@ -1,21 +1,28 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The `levi` command-line interface.
 //!
-//! Phase 1 surface: `request`, `serve --stdio` and `validate`. `request` runs the
+//! Surface: `request`, `run`, `serve --stdio` and `validate`. `request` runs the
 //! **real protocol path** — it sends a `SendRequest` to an engine over an in-process
 //! transport, rather than calling the transport directly. There is no shortcut here
 //! on purpose: if the protocol is wrong, the CLI breaks first.
 //!
-//! `run`, `import` and `selftest` land in later phases.
+//! `run` is the load path: it compiles a scenario against a collection and drives it
+//! through `lev-load`, then prints a summary and (optionally) writes a JSON report.
+//! `import` and `selftest` land in later phases.
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lev_core::{Collection, CoreError};
+use lev_core::{Collection, CoreError, Id, RequestDef};
 use lev_engine::{convert, in_process_client, store_from_env, Engine, EngineError, RequestOutcome};
-use lev_format::{load_collection, load_request, load_vars, FormatError, Yaml};
+use lev_format::{load_collection, load_request, load_scenario, load_vars, FormatError, Yaml};
+use lev_load::{CompiledScenario, JsonReporter, LoadError, Reporter, RunConfig};
+use lev_metrics::{RunId, RunReport};
 use lev_protocol::{EchoDto, ErrorCode, NdjsonTransport, ResponseDto, TimingsDto};
 
 /// Use mimalloc as the global allocator: a load generator allocates constantly, and
@@ -57,6 +64,7 @@ USAGE:
 
 COMMANDS:
     request <file>       Send one request and print the response
+    run <scenario>       Run a load scenario and print a report
     serve --stdio        Serve the protocol over stdin/stdout (NDJSON)
     validate <dir>       Parse a collection directory and report errors
     help                 Print this help
@@ -69,9 +77,17 @@ REQUEST OPTIONS:
     --show-body          Print the (redacted) response body
     --max-body <bytes>   Truncate the printed body [default: 4096]
 
+RUN OPTIONS:
+    --collection <dir>   Collection directory (default: the scenario file's folder)
+    --env <name>         Load environments/<name>.yaml
+    --workers <n>        Worker threads [default: logical CPUs]
+    --seed <n>           Base seed; each virtual user derives its own
+    --out <file>         Write a JSON report to <file>
+    --quiet              Suppress the printed summary
+
 EXIT CODES:
     0  success
-    1  a check failed (thresholds, which share this code, land in Phase 3)
+    1  a check or threshold failed (thresholds land in a later Phase 3 slice)
     2  configuration or usage error
     3  engine error
     4  aborted
@@ -80,6 +96,10 @@ Secrets are read from environment variables named LEVI_SECRET_<NAME>. The engine
 redacts secret values before anything is printed or crosses the protocol. Pre- and
 post-request scripts run in a sandbox with a CPU budget and a memory limit; checks
 from `lev.test(...)` and from `assertions:` are reported and set the exit code.
+
+`levi run` drives the closed (constant-VU) executor. Scripts and assertions are not
+yet evaluated under load, and thresholds are not yet enforced, so a completed run
+exits 0.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -128,6 +148,21 @@ impl From<EngineError> for Fail {
     }
 }
 
+impl From<LoadError> for Fail {
+    fn from(error: LoadError) -> Self {
+        // A bad scenario or an unreachable variable is the author's mistake (2);
+        // anything else is the engine failing to do its job (3).
+        let code = match &error {
+            LoadError::Config(_) | LoadError::Core(_) | LoadError::Http(_) => EXIT_CONFIG,
+            _ => EXIT_ENGINE,
+        };
+        Self {
+            message: error.to_string(),
+            code,
+        }
+    }
+}
+
 /// Map a stable wire error code onto the CLI's exit-code contract.
 fn exit_code_for(code: ErrorCode) -> u8 {
     match code {
@@ -147,6 +182,7 @@ async fn run(args: &[String]) -> Result<(), Fail> {
 
     match command.as_str() {
         "request" => run_request(&args[1..]).await,
+        "run" => run_load(&args[1..]).await,
         "serve" => run_serve(&args[1..]).await,
         "validate" => run_validate(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -226,6 +262,136 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
         });
     }
     Ok(())
+}
+
+// ---- run (load) ----
+
+async fn run_load(args: &[String]) -> Result<(), Fail> {
+    let options = RunOptions::parse(args)?;
+    let format = Yaml;
+
+    let base_dir = options
+        .collection
+        .clone()
+        .unwrap_or_else(|| discover_collection_dir(&options.file));
+
+    // The collection supplies `baseUrl` and default auth, exactly as a single send.
+    let collection_path = base_dir.join("collection.yaml");
+    let collection = if collection_path.is_file() {
+        load_collection(&format, &collection_path)?
+    } else {
+        Collection::empty()
+    };
+
+    // Every request in the collection is a candidate step target.
+    let requests = load_requests(&format, &base_dir.join("requests"))?;
+    if requests.is_empty() {
+        return Err(Fail::config(format!(
+            "no requests found under `{}`",
+            base_dir.join("requests").display()
+        )));
+    }
+
+    // `global < collection < environment`; the engine still owns resolution.
+    let mut vars = collection.vars.clone();
+    if let Some(name) = options.env.as_deref() {
+        let env_path = base_dir.join("environments").join(format!("{name}.yaml"));
+        if !env_path.is_file() {
+            return Err(Fail::config(format!(
+                "environment file not found: {}",
+                env_path.display()
+            )));
+        }
+        vars = vars.merged_with(&load_vars(&format, &env_path)?);
+    }
+
+    let scenario = load_scenario(&format, &options.file)?;
+    let compiled = CompiledScenario::compile(&scenario, &collection, &requests)?;
+
+    let mut config = RunConfig::new(
+        new_run_id(),
+        Arc::new(compiled),
+        vars,
+        Arc::new(store_from_env()),
+        options.seed,
+    );
+    if let Some(workers) = options.workers {
+        config = config.with_workers(workers);
+    }
+
+    let mut reporters: Vec<Box<dyn Reporter>> = Vec::new();
+    if let Some(path) = options.out.clone() {
+        reporters.push(Box::new(JsonReporter::new(path)));
+    }
+
+    let report = lev_load::run(config, &mut reporters).await?;
+
+    if !options.quiet {
+        print_report(&report, options.out.as_deref());
+    }
+    Ok(())
+}
+
+/// Load every `requests/*.yaml` into an id-keyed map; duplicate ids are an error.
+fn load_requests(format: &Yaml, dir: &Path) -> Result<BTreeMap<Id, RequestDef>, Fail> {
+    let mut requests: BTreeMap<Id, RequestDef> = BTreeMap::new();
+    for path in yaml_files(dir)? {
+        let request = load_request(format, &path)?;
+        if requests.insert(request.id.clone(), request).is_some() {
+            return Err(Fail::config(format!(
+                "duplicate request id in `{}`",
+                path.display()
+            )));
+        }
+    }
+    Ok(requests)
+}
+
+fn new_run_id() -> RunId {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    RunId::new(format!("run-{millis}"))
+}
+
+fn print_report(report: &RunReport, out: Option<&Path>) {
+    println!(
+        "run {} — {}",
+        report.run_id.as_str(),
+        report.outcome.as_str()
+    );
+    println!("  duration         {}", format_secs(report.duration));
+    println!("  vus (max)        {}", report.max_vus);
+    println!("  http_reqs        {}", report.http_reqs);
+    println!("  http_req_failed  {}", report.http_req_failed);
+    println!("  iterations       {}", report.iterations);
+    println!("  rps              {:.1}", report.requests_per_second());
+    println!(
+        "  latency p50/p90/p95/p99  {} / {} / {} / {}",
+        format_latency(report.latency.p50),
+        format_latency(report.latency.p90),
+        format_latency(report.latency.p95),
+        format_latency(report.latency.p99),
+    );
+    println!(
+        "  scheduler_lag    {}",
+        format_ms(report.scheduler_lag.as_secs_f64() * 1000.0)
+    );
+    if let Some(path) = out {
+        println!("  report           {}", path.display());
+    }
+}
+
+fn format_secs(duration: Duration) -> String {
+    format!("{:.3} s", duration.as_secs_f64())
+}
+
+fn format_latency(value: Option<Duration>) -> String {
+    match value {
+        Some(duration) => format_ms(duration.as_secs_f64() * 1000.0),
+        None => "n/a".to_string(),
+    }
 }
 
 // ---- serve ----
@@ -511,4 +677,89 @@ fn next_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a st
     args.get(index)
         .map(String::as_str)
         .ok_or_else(|| Fail::config(format!("{flag} needs a value")))
+}
+
+struct RunOptions {
+    file: PathBuf,
+    collection: Option<PathBuf>,
+    env: Option<String>,
+    workers: Option<usize>,
+    seed: u64,
+    out: Option<PathBuf>,
+    quiet: bool,
+}
+
+impl RunOptions {
+    fn parse(args: &[String]) -> Result<Self, Fail> {
+        let mut file: Option<PathBuf> = None;
+        let mut collection = None;
+        let mut env_name = None;
+        let mut workers = None;
+        let mut seed = 0u64;
+        let mut out = None;
+        let mut quiet = false;
+
+        let mut index = 0;
+        while index < args.len() {
+            let arg = &args[index];
+            match arg.as_str() {
+                "--collection" => {
+                    index += 1;
+                    collection = Some(PathBuf::from(next_value(args, index, "--collection")?));
+                }
+                "--env" => {
+                    index += 1;
+                    env_name = Some(next_value(args, index, "--env")?.to_string());
+                }
+                "--workers" => {
+                    index += 1;
+                    let value = next_value(args, index, "--workers")?;
+                    let parsed: usize = value.parse().map_err(|_| {
+                        Fail::config(format!("--workers must be an integer, got `{value}`"))
+                    })?;
+                    if parsed == 0 {
+                        return Err(Fail::config("--workers must be at least 1"));
+                    }
+                    workers = Some(parsed);
+                }
+                "--seed" => {
+                    index += 1;
+                    let value = next_value(args, index, "--seed")?;
+                    seed = value.parse().map_err(|_| {
+                        Fail::config(format!("--seed must be an integer, got `{value}`"))
+                    })?;
+                }
+                "--out" => {
+                    index += 1;
+                    out = Some(PathBuf::from(next_value(args, index, "--out")?));
+                }
+                "--quiet" => quiet = true,
+                "-h" | "--help" => {
+                    print!("{}", usage());
+                    std::process::exit(0);
+                }
+                other if other.starts_with('-') => {
+                    return Err(Fail::config(format!("unknown option `{other}`")));
+                }
+                _ => {
+                    if file.is_some() {
+                        return Err(Fail::config("more than one scenario file given"));
+                    }
+                    file = Some(PathBuf::from(arg));
+                }
+            }
+            index += 1;
+        }
+
+        let file = file.ok_or_else(|| Fail::config("run needs a <scenario>"))?;
+        Ok(Self {
+            file,
+            collection,
+            env: env_name,
+            workers,
+            seed,
+            out,
+            quiet,
+        })
+    }
 }

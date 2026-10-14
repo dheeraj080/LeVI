@@ -1,0 +1,12 @@
+id: smoke
+name: Smoke load
+executor:
+  constantVus:
+    # Deliberately small: this runs against the local dev server, not a real target.
+    vus: 5
+    duration: 10s
+steps:
+  - request: get-root
+    thinkTime: 250ms
+  - request: create-order
+    thinkTime: 250ms

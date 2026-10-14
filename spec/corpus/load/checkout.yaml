@@ -1,0 +1,10 @@
+id: corpus-scenario
+name: Corpus scenario
+executor:
+  constantVus:
+    vus: 10
+    duration: 30s
+steps:
+  - request: corpus-request
+    thinkTime: 500ms
+  - request: corpus-request

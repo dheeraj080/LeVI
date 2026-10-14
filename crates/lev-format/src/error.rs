@@ -18,6 +18,12 @@ pub enum FormatError {
         source: std::io::Error,
     },
 
+    #[error("invalid duration `{0}`: expected e.g. `250ms`, `30s`, `2m`, `1h`")]
+    InvalidDuration(String),
+
+    #[error("invalid scenario: {0}")]
+    InvalidScenario(String),
+
     #[error(transparent)]
     Core(#[from] lev_core::CoreError),
 }

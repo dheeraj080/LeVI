@@ -5,14 +5,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use lev_core::{
-    ApiKeyLocation, Assertion, Auth, Body, Collection, Method, RequestDef, Scripts, SecretName,
-    Template, VarSet, VarValue,
+    ApiKeyLocation, Assertion, Auth, Body, Collection, Executor, Method, RequestDef, Scenario,
+    Scripts, SecretName, Step, Template, VarSet, VarValue,
 };
 
 use crate::dto::{
-    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CollectionDto, FormFieldDto,
-    HeaderAssertionDto, HeaderDto, JsonPathAssertionDto, RawBodyDto, RequestDto, ScriptsDto,
-    VarValueDto,
+    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CollectionDto, ConstantVusDto, DurationDto,
+    ExecutorDto, FormFieldDto, HeaderAssertionDto, HeaderDto, JsonPathAssertionDto, RawBodyDto,
+    RequestDto, ScenarioDto, ScriptsDto, StepDto, VarValueDto,
 };
 use crate::error::FormatError;
 
@@ -262,5 +262,127 @@ fn body_from_core(body: &Body) -> Option<BodyDto> {
         Body::File(template) => Some(BodyDto::File {
             file: template.source().to_string(),
         }),
+    }
+}
+
+// ---- scenario ----
+
+pub fn scenario_to_core(dto: ScenarioDto) -> Result<Scenario, FormatError> {
+    let executor = match dto.executor.constant_vus {
+        Some(constant_vus) => {
+            if constant_vus.vus == 0 {
+                return Err(FormatError::InvalidScenario(
+                    "executor `constantVus.vus` must be at least 1".to_string(),
+                ));
+            }
+            Executor::ConstantVus {
+                vus: constant_vus.vus,
+                duration: duration_to_core(&constant_vus.duration)?,
+            }
+        }
+        None => {
+            return Err(FormatError::InvalidScenario(
+                "no executor configured (expected `constantVus`)".to_string(),
+            ))
+        }
+    };
+
+    let mut steps = Vec::with_capacity(dto.steps.len());
+    for step in dto.steps {
+        steps.push(Step {
+            request: step.request,
+            think_time: step.think_time.as_ref().map(duration_to_core).transpose()?,
+        });
+    }
+    if steps.is_empty() {
+        return Err(FormatError::InvalidScenario(
+            "scenario has no steps".to_string(),
+        ));
+    }
+
+    Ok(Scenario {
+        id: dto.id,
+        name: dto.name,
+        executor,
+        steps,
+    })
+}
+
+pub fn scenario_from_core(scenario: &Scenario) -> ScenarioDto {
+    let executor = match &scenario.executor {
+        Executor::ConstantVus { vus, duration } => ExecutorDto {
+            constant_vus: Some(ConstantVusDto {
+                vus: *vus,
+                duration: DurationDto::Text(format_duration(*duration)),
+            }),
+        },
+    };
+    ScenarioDto {
+        id: scenario.id.clone(),
+        name: scenario.name.clone(),
+        executor,
+        steps: scenario
+            .steps
+            .iter()
+            .map(|step| StepDto {
+                request: step.request.clone(),
+                think_time: step
+                    .think_time
+                    .map(|duration| DurationDto::Text(format_duration(duration))),
+            })
+            .collect(),
+    }
+}
+
+fn duration_to_core(dto: &DurationDto) -> Result<Duration, FormatError> {
+    match dto {
+        DurationDto::Seconds(seconds) => Ok(Duration::from_secs(*seconds)),
+        DurationDto::Text(text) => parse_duration(text),
+    }
+}
+
+/// Parse a duration: `250ms`, `30s`, `2m`, `1h`, or a bare number of seconds.
+pub fn parse_duration(input: &str) -> Result<Duration, FormatError> {
+    let text = input.trim();
+    let digits_end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(digits_end);
+
+    let value: u64 = number
+        .parse()
+        .map_err(|_| FormatError::InvalidDuration(input.to_string()))?;
+
+    let micros = match unit.trim() {
+        "us" => return Ok(Duration::from_micros(value)),
+        "ms" => value as u128 * 1_000,
+        "s" | "" => value as u128 * 1_000_000,
+        "m" => value as u128 * 60 * 1_000_000,
+        "h" => value as u128 * 3_600 * 1_000_000,
+        _ => return Err(FormatError::InvalidDuration(input.to_string())),
+    };
+    if micros > u64::MAX as u128 {
+        return Err(FormatError::InvalidDuration(input.to_string()));
+    }
+    Ok(Duration::from_micros(micros as u64))
+}
+
+/// Render a duration in the canonical on-disk form: the largest whole unit.
+pub fn format_duration(duration: Duration) -> String {
+    let micros = duration.as_micros();
+    if !micros.is_multiple_of(1_000) {
+        return format!("{micros}us");
+    }
+    let millis = micros / 1_000;
+    if millis == 0 {
+        "0ms".to_string()
+    } else if millis.is_multiple_of(3_600_000) {
+        format!("{}h", millis / 3_600_000)
+    } else if millis.is_multiple_of(60_000) {
+        format!("{}m", millis / 60_000)
+    } else if millis.is_multiple_of(1_000) {
+        format!("{}s", millis / 1_000)
+    } else {
+        format!("{millis}ms")
     }
 }

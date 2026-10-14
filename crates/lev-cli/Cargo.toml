@@ -16,6 +16,8 @@ path = "src/main.rs"
 lev-core = { version = "0.0.0", path = "../lev-core" }
 lev-engine = { version = "0.0.0", path = "../lev-engine" }
 lev-format = { version = "0.0.0", path = "../lev-format" }
+lev-load = { version = "0.0.0", path = "../lev-load" }
+lev-metrics = { version = "0.0.0", path = "../lev-metrics" }
 lev-protocol = { version = "0.0.0", path = "../lev-protocol" }
 mimalloc = "0.1.52"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }
