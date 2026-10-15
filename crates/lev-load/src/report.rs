@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lev_metrics::{MetricSnapshot, RunReport};
+use lev_metrics::{MetricSnapshot, RunReport, StopReason, ThresholdResult};
 use serde_json::{json, Value};
 
 use crate::error::LoadError;
@@ -64,9 +64,24 @@ impl Reporter for JsonReporter {
 /// Hand-built rather than derived, so `lev-metrics` stays free of `serde` and the JSON
 /// can use k6's metric names for the latency block.
 pub fn report_to_json(report: &RunReport) -> Value {
+    let stopped_by = report.stopped_by.as_ref().map(|reason| match reason {
+        StopReason::Interrupt => json!({"kind": "interrupt"}),
+        StopReason::Threshold { metric } => json!({
+            "kind": "threshold",
+            "metric": metric,
+        }),
+    });
+
+    let thresholds: Vec<Value> = report
+        .thresholds
+        .iter()
+        .map(threshold_result_to_json)
+        .collect();
+
     json!({
         "runId": report.run_id.as_str(),
         "outcome": report.outcome.as_str(),
+        "stoppedBy": stopped_by,
         "startedAtUnixMs": report.started_at_unix_ms,
         "plannedDurationMs": millis(report.planned_duration),
         "durationMs": millis(report.duration),
@@ -86,7 +101,18 @@ pub fn report_to_json(report: &RunReport) -> Value {
                 "p95": opt_millis(report.latency.p95),
                 "p99": opt_millis(report.latency.p99),
             }
-        }
+        },
+        "thresholds": thresholds
+    })
+}
+
+fn threshold_result_to_json(result: &ThresholdResult) -> Value {
+    json!({
+        "metric": result.metric,
+        "expression": result.expression,
+        "passed": result.passed,
+        "observed": result.observed,
+        "unit": result.unit.as_str(),
     })
 }
 
@@ -107,6 +133,7 @@ mod tests {
         RunReport {
             run_id: RunId::new("run-1"),
             outcome: RunOutcome::Completed,
+            stopped_by: None,
             started_at_unix_ms: 1_700_000_000_000,
             planned_duration: Duration::from_secs(10),
             duration: Duration::from_secs(10),
@@ -124,6 +151,7 @@ mod tests {
                 p95: None,
                 p99: Some(Duration::from_millis(9)),
             },
+            thresholds: Vec::new(),
         }
     }
 
@@ -137,6 +165,9 @@ mod tests {
         assert!(value["metrics"]["http_req_duration"]["p95"].is_null());
         assert_eq!(value["outcome"], "completed");
         assert_eq!(value["requestsPerSecond"], 400.0);
+        assert_eq!(value["metrics"]["http_req_failed"], 3);
+        assert!(value["thresholds"].is_array());
+        assert!(value["thresholds"].as_array().unwrap().is_empty());
     }
 
     #[test]

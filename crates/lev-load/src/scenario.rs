@@ -10,7 +10,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use lev_core::{compile_request, Collection, CompiledRequest, Executor, Id, RequestDef, Scenario};
+use lev_core::{
+    compile_request, Collection, CompiledRequest, Executor, Id, RequestDef, Scenario, Threshold,
+    ThresholdMetric,
+};
 
 use crate::error::LoadError;
 
@@ -35,6 +38,10 @@ pub struct CompiledScenario {
     /// How long the run is planned to last.
     pub duration: Duration,
     pub steps: Vec<CompiledStep>,
+    /// The rules the run is judged by, parsed once.
+    pub thresholds: Vec<Threshold>,
+    /// Metrics whose failure stops the run mid-flight.
+    pub abort_on: Vec<ThresholdMetric>,
 }
 
 impl CompiledScenario {
@@ -85,6 +92,8 @@ impl CompiledScenario {
             vus,
             duration,
             steps,
+            thresholds: scenario.thresholds.clone(),
+            abort_on: scenario.abort_on.clone(),
         })
     }
 }

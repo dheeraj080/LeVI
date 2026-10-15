@@ -664,6 +664,7 @@ dependencies = [
  "mimalloc",
  "serde_json",
  "tokio",
+ "tokio-util",
  "wiremock",
 ]
 
@@ -727,6 +728,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-util",
  "wiremock",
 ]
 
@@ -1309,6 +1311,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

@@ -22,8 +22,9 @@ use lev_core::{Collection, CoreError, Id, RequestDef};
 use lev_engine::{convert, in_process_client, store_from_env, Engine, EngineError, RequestOutcome};
 use lev_format::{load_collection, load_request, load_scenario, load_vars, FormatError, Yaml};
 use lev_load::{CompiledScenario, JsonReporter, LoadError, Reporter, RunConfig};
-use lev_metrics::{RunId, RunReport};
+use lev_metrics::{RunId, RunReport, StopReason, ThresholdResult, ThresholdUnit};
 use lev_protocol::{EchoDto, ErrorCode, NdjsonTransport, ResponseDto, TimingsDto};
+use tokio_util::sync::CancellationToken;
 
 /// Use mimalloc as the global allocator: a load generator allocates constantly, and
 /// a predictable allocator keeps generator-side jitter out of the histograms.
@@ -33,14 +34,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // Exit codes are a contract for CI and are documented permanently (see README).
 /// Success.
 const EXIT_SUCCESS: u8 = 0;
-/// A check failed. (Thresholds, which share this code, land in Phase 3.)
+/// A check or threshold failed. Precedence: a failed threshold outranks an abort,
+/// because a failed threshold is the actionable signal CI gates on.
 const EXIT_THRESHOLD: u8 = 1;
 /// A configuration or usage error.
 const EXIT_CONFIG: u8 = 2;
 /// The engine failed to do its job.
 const EXIT_ENGINE: u8 = 3;
-/// Aborted by the user or by `abortOn`. Reserved: load runs land in Phase 3.
-#[allow(dead_code)]
+/// The run was aborted (Ctrl-C, or `abortOn`) without a failed threshold to report.
 const EXIT_ABORTED: u8 = 4;
 
 #[tokio::main]
@@ -87,19 +88,21 @@ RUN OPTIONS:
 
 EXIT CODES:
     0  success
-    1  a check or threshold failed (thresholds land in a later Phase 3 slice)
+    1  a check or threshold failed
     2  configuration or usage error
     3  engine error
-    4  aborted
+    4  aborted (Ctrl-C or `abortOn`) with no failed threshold
 
 Secrets are read from environment variables named LEVI_SECRET_<NAME>. The engine
 redacts secret values before anything is printed or crosses the protocol. Pre- and
 post-request scripts run in a sandbox with a CPU budget and a memory limit; checks
 from `lev.test(...)` and from `assertions:` are reported and set the exit code.
 
-`levi run` drives the closed (constant-VU) executor. Scripts and assertions are not
-yet evaluated under load, and thresholds are not yet enforced, so a completed run
-exits 0.
+`levi run` drives the closed (constant-VU) executor. A scenario's `thresholds` are
+evaluated on the run's numbers and printed in the report; a threshold that fails exits
+1. A metric listed in `abortOn` stops the run as soon as its threshold fails, and
+Ctrl-C stops it gracefully with a partial report. Scripts and assertions are not yet
+evaluated under load.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -308,13 +311,25 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
     let scenario = load_scenario(&format, &options.file)?;
     let compiled = CompiledScenario::compile(&scenario, &collection, &requests)?;
 
+    // Ctrl-C stops the run gracefully: the signal cancels the token the VUs watch, the
+    // engine drains what is in flight, and the report says `aborted`.
+    let cancel = CancellationToken::new();
+    let cancel_for_signal = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("stopping... (Ctrl-C again to quit)");
+            cancel_for_signal.cancel();
+        }
+    });
+
     let mut config = RunConfig::new(
         new_run_id(),
         Arc::new(compiled),
         vars,
         Arc::new(store_from_env()),
         options.seed,
-    );
+    )
+    .with_cancel(cancel);
     if let Some(workers) = options.workers {
         config = config.with_workers(workers);
     }
@@ -329,7 +344,31 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
     if !options.quiet {
         print_report(&report, options.out.as_deref());
     }
-    Ok(())
+
+    // The exit-code contract: a failed threshold is the verdict CI acts on and outranks
+    // an abort; a plain abort (nothing failed) is its own code.
+    let failed = report.thresholds.iter().filter(|t| !t.passed).count();
+    if failed > 0 {
+        return Err(Fail {
+            message: format!(
+                "{failed} of {} threshold(s) failed",
+                report.thresholds.len()
+            ),
+            code: EXIT_THRESHOLD,
+        });
+    }
+    match report.stopped_by {
+        Some(reason) => Err(Fail {
+            message: match reason {
+                StopReason::Interrupt => "run aborted".to_string(),
+                StopReason::Threshold { metric } => {
+                    format!("run aborted: threshold on `{metric}` failed")
+                }
+            },
+            code: EXIT_ABORTED,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Load every `requests/*.yaml` into an id-keyed map; duplicate ids are an error.
@@ -378,8 +417,39 @@ fn print_report(report: &RunReport, out: Option<&Path>) {
         "  scheduler_lag    {}",
         format_ms(report.scheduler_lag.as_secs_f64() * 1000.0)
     );
+    if let Some(reason) = &report.stopped_by {
+        match reason {
+            StopReason::Interrupt => println!("  stopped by       interrupt"),
+            StopReason::Threshold { metric } => {
+                println!("  stopped by       threshold ({metric})");
+            }
+        }
+    }
+    if !report.thresholds.is_empty() {
+        println!("  thresholds");
+        for result in &report.thresholds {
+            let mark = if result.passed { "pass" } else { "FAIL" };
+            println!(
+                "    {mark}  {} {}  {}",
+                result.metric,
+                result.expression,
+                format_observed(result)
+            );
+        }
+    }
     if let Some(path) = out {
         println!("  report           {}", path.display());
+    }
+}
+
+/// The observed number behind a threshold, in its own unit — `no samples` when the run
+/// produced nothing to compare, which is a failure and should read like one.
+fn format_observed(result: &ThresholdResult) -> String {
+    match (result.observed, result.unit) {
+        (None, _) => "no samples".to_string(),
+        (Some(value), ThresholdUnit::Milliseconds) => format_ms(value),
+        (Some(value), ThresholdUnit::Rate) => format!("{value:.4}"),
+        (Some(value), ThresholdUnit::Count) => format!("{value:.0}"),
     }
 }
 

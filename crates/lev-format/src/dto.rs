@@ -257,7 +257,12 @@ pub struct ScenarioDto {
     pub id: String,
     pub name: String,
     pub executor: ExecutorDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepDto>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub thresholds: BTreeMap<String, Vec<String>>,
+    #[serde(default, rename = "abortOn", skip_serializing_if = "Vec::is_empty")]
+    pub abort_on: Vec<String>,
 }
 
 fn default_method() -> String {

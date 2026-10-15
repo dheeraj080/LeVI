@@ -24,6 +24,9 @@ pub enum CoreError {
 
     #[error("unsupported body: {0}")]
     UnsupportedBody(String),
+
+    #[error("invalid threshold: {0}")]
+    InvalidThreshold(String),
 }
 
 /// Convenience alias.

@@ -10,7 +10,7 @@ plain text, one request per file. This directory holds the specification and the
 collection.yaml               # id, name, vars, auth defaults, baseUrl
 environments/<env>.yaml       # an overlay of vars
 requests/<name>.yaml          # one request per file
-load/<name>.yaml              # a load scenario: executor + steps
+load/<name>.yaml              # a load scenario: executor + steps + thresholds
 ```
 
 ## Syntax
@@ -141,6 +141,13 @@ steps:                    # run in order, once per iteration
   - request: create-order
     thinkTime: 1s
   - request: get-order
+thresholds:               # optional: the rules the run is judged by
+  http_req_duration:
+    - p(95)<500           # 95th percentile under 500 ms
+  http_req_failed:
+    - rate<0.01           # at most 1% of requests failed
+abortOn:                  # optional: stop the run as soon as one of these fails
+  - http_req_failed
 ```
 
 - **`executor`** selects the load model. Only `constantVus` exists today: a closed model
@@ -149,6 +156,22 @@ steps:                    # run in order, once per iteration
 - **`steps`** is an ordered list. `request` is the `id` of a request in
   `requests/`; `thinkTime` (optional) is the pause after that step.
 - A **duration** is `250ms`, `30s`, `2m`, `1h`, or a bare number read as seconds.
+- **`thresholds`** maps a metric to one or more expressions. The syntax is k6's, so the
+  expressions people already write work unchanged:
+
+  | Metric | Stats | Unit of the number |
+  |---|---|---|
+  | `http_req_duration` | `count`, `avg`, `min`, `max`, `p(N)` | milliseconds |
+  | `http_req_failed` | `count`, `rate` | `rate` is a `0..1` fraction |
+  | `http_reqs`, `iterations`, `checks`, `checks_failed`, `script_errors` | `count` | a count |
+
+  The comparison is one of `>`, `>=`, `<`, `<=`, `==`, `!=`. A stat a metric cannot
+  answer — `p(95)` of a counter, `rate` of a latency — is a parse error, not a silently
+  meaningless rule. A stat with no samples (a percentile of an empty run) **fails**: a
+  threshold that cannot be evaluated must not read as verified.
+- **`abortOn`** lists metrics whose failure should stop the run immediately instead of
+  being reported at the end. Each name must also have a `thresholds` entry; one that does
+  not is a parse error, because an abort rule with no rule behind it could never fire.
 
 Running it prints a summary and (with `--out`) writes a JSON report:
 
@@ -156,8 +179,10 @@ Running it prints a summary and (with `--out`) writes a JSON report:
 levi run load/checkout.yaml --env dev --workers 8 --seed 1 --out report.json
 ```
 
-A completed run exits `0`. Thresholds — and therefore exit code `1` for a failed one —
-arrive in a later slice; a configuration error is `2` and an engine error is `3`.
+A completed run with no failing threshold exits `0`; a failed threshold exits `1`. A
+configuration error is `2` and an engine error is `3`. A run stopped by Ctrl-C, or by
+`abortOn`, is reported as `aborted` and exits `4` — unless a threshold failed, which
+takes precedence and exits `1`, because that is the signal CI gates on.
 
 ## Conformance corpus
 

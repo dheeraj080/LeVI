@@ -219,3 +219,69 @@ fn a_bare_number_duration_is_read_as_seconds() {
         std::time::Duration::from_secs(15)
     );
 }
+
+#[test]
+fn thresholds_and_abort_rules_parse_into_the_domain() {
+    use lev_core::{Comparison, ThresholdMetric, ThresholdStat};
+
+    let format = Yaml;
+    let source = read(&corpus_dir().join("load/timed.yaml"));
+    let scenario = format.scenario_from_str(&source).unwrap();
+
+    // Metrics come out grouped and in name order; expressions keep their file order.
+    let expressions: Vec<String> = scenario
+        .thresholds
+        .iter()
+        .map(|threshold| format!("{} {}", threshold.metric.name(), threshold))
+        .collect();
+    assert_eq!(
+        expressions,
+        [
+            "http_req_duration p(95)<500",
+            "http_req_duration p(99.9)<1500",
+            "http_req_failed rate<0.01",
+            "http_reqs count>0",
+        ],
+        "thresholds did not parse as written"
+    );
+
+    let p95 = scenario.thresholds[0];
+    assert_eq!(p95.stat, ThresholdStat::Percentile(95.0));
+    assert_eq!(p95.comparison, Comparison::Lt);
+    assert_eq!(p95.value, 500.0);
+
+    // `rate` is a fraction, so 0.01 is one percent — not 0.01 of a percent.
+    let rate = scenario.thresholds[2];
+    assert_eq!(rate.stat, ThresholdStat::Rate);
+    assert_eq!(rate.value, 0.01);
+
+    assert_eq!(scenario.abort_on, vec![ThresholdMetric::HttpReqFailed]);
+}
+
+#[test]
+fn a_bad_threshold_or_abort_rule_is_a_scenario_error() {
+    let format = Yaml;
+    let base = "id: x\nname: X\nexecutor:\n  constantVus: { vus: 1, duration: 1s }\nsteps:\n  - request: r\n";
+
+    // A percentile of a counter can never mean anything.
+    let bad_stat = format!("{base}thresholds:\n  http_reqs:\n    - p(95)<500\n");
+    assert!(matches!(
+        format.scenario_from_str(&bad_stat),
+        Err(lev_format::FormatError::InvalidScenario(_))
+    ));
+
+    // An abort rule needs a threshold to fire on.
+    let dangling_abort = format!("{base}abortOn:\n  - http_req_failed\n");
+    assert!(matches!(
+        format.scenario_from_str(&dangling_abort),
+        Err(lev_format::FormatError::InvalidScenario(_))
+    ));
+
+    // ... and it has to name a metric we produce.
+    let unknown_abort =
+        format!("{base}thresholds:\n  http_req_failed:\n    - rate<0.01\nabortOn:\n  - nope\n");
+    assert!(matches!(
+        format.scenario_from_str(&unknown_abort),
+        Err(lev_format::FormatError::InvalidScenario(_))
+    ));
+}

@@ -91,6 +91,78 @@ impl RunOutcome {
     }
 }
 
+/// Why a run stopped before its planned duration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    /// The user interrupted it (Ctrl-C).
+    Interrupt,
+    /// A threshold named in `abortOn` failed, so the run stopped itself.
+    Threshold {
+        /// The metric whose threshold failed.
+        metric: String,
+    },
+}
+
+impl StopReason {
+    /// The name a report gives this reason.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StopReason::Interrupt => "interrupt",
+            StopReason::Threshold { .. } => "threshold",
+        }
+    }
+}
+
+/// The unit a threshold's observed value is in.
+///
+/// The unit follows the *stat*, not the metric: a `p(95)` over a duration is
+/// milliseconds, a `rate` is a fraction, and a `count` is a count. A report keeps the
+/// unit next to the number so a consumer never has to guess — `0.01` and `10` are both
+/// plausible-looking numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdUnit {
+    Milliseconds,
+    /// A `0..1` fraction.
+    Rate,
+    Count,
+}
+
+impl ThresholdUnit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThresholdUnit::Milliseconds => "ms",
+            ThresholdUnit::Rate => "rate",
+            ThresholdUnit::Count => "count",
+        }
+    }
+}
+
+/// The verdict on one threshold, and the number that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThresholdResult {
+    /// The metric the threshold is about (k6's name).
+    pub metric: String,
+    /// The expression as it is written in the scenario, canonical form.
+    pub expression: String,
+    /// Whether the run satisfied it.
+    pub passed: bool,
+    /// What the run actually measured, in [`unit`](Self::unit).
+    ///
+    /// `None` means "no samples": the run produced no data for this stat, so the
+    /// threshold **fails** rather than passing by default. A threshold that cannot be
+    /// evaluated must not read as verified.
+    pub observed: Option<f64>,
+    /// The unit of [`observed`](Self::observed).
+    pub unit: ThresholdUnit,
+}
+
+impl ThresholdResult {
+    /// Whether the threshold was evaluated at all.
+    pub fn was_evaluated(&self) -> bool {
+        self.observed.is_some()
+    }
+}
+
 /// Percentiles of a latency distribution, in the units recorded.
 ///
 /// `None` means "no samples yet" rather than "0", so a UI can distinguish an empty
@@ -168,10 +240,12 @@ impl MetricSnapshot {
 /// from the merged HDR and fills in [`LatencySummary`], then a reporter serializes it.
 /// `started_at_unix_ms` is the *only* wall-clock value; everything measured uses a
 /// monotonic clock, so a clock adjustment mid-run cannot corrupt the numbers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RunReport {
     pub run_id: RunId,
     pub outcome: RunOutcome,
+    /// Why the run stopped early, if at all.
+    pub stopped_by: Option<StopReason>,
     /// Unix milliseconds at which the run started (wall clock, for report timestamps).
     pub started_at_unix_ms: u64,
     /// The duration the executor planned to run for.
@@ -188,6 +262,8 @@ pub struct RunReport {
     pub script_errors: u64,
     pub scheduler_lag: Duration,
     pub latency: LatencySummary,
+    /// The verdict on each configured threshold, in the order configured.
+    pub thresholds: Vec<ThresholdResult>,
 }
 
 impl RunReport {
@@ -435,6 +511,7 @@ mod tests {
         let report = RunReport {
             run_id: RunId::new("r1"),
             outcome: RunOutcome::Completed,
+            stopped_by: None,
             started_at_unix_ms: 0,
             planned_duration: Duration::from_secs(10),
             duration: Duration::from_secs(10),
@@ -447,6 +524,7 @@ mod tests {
             script_errors: 0,
             scheduler_lag: Duration::from_millis(2),
             latency: LatencySummary::default(),
+            thresholds: Vec::new(),
         };
         assert!((report.requests_per_second() - 500.0).abs() < f64::EPSILON);
         assert_eq!(RunOutcome::Completed.as_str(), "completed");

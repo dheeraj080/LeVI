@@ -14,9 +14,11 @@ of thousands of times per second for a load run.
 > frozen - see [`PROTOCOL.md`](PROTOCOL.md). Requests may carry JavaScript pre/post hooks
 > and declarative assertions, run in a sandboxed QuickJS runtime with a CPU budget and a
 > memory limit; a runaway script fails one request and never hangs the run. `levi run`
-> now drives a closed (constant-VU) load scenario and reports per-worker HDR percentiles.
-> Still to come in Phase 3: open/ramping executors, thresholds, graceful stop, more
-> reporters, and `levi selftest`.
+> now drives a closed (constant-VU) load scenario, reports per-worker HDR percentiles,
+> and judges the run against a scenario's `thresholds` — a failed one exits 1, `abortOn`
+> stops the run as soon as it fails, and Ctrl-C ends it gracefully with a partial report.
+> Still to come in Phase 3: open/ramping executors, coordinated-omission correction,
+> more reporters, and `levi selftest`.
 
 ## Layout
 
@@ -97,10 +99,14 @@ CI runs fmt, clippy (`-D warnings`), tests, and `cargo-deny` (license/advisory p
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | A check or threshold failed (thresholds land in a later Phase 3 slice) |
+| 1 | A check or a threshold failed |
 | 2 | Configuration / validation error |
 | 3 | Engine error |
-| 4 | Aborted (user or `abortOn`) |
+| 4 | Aborted (Ctrl-C, or `abortOn` with no failed threshold to report) |
+
+A failed threshold takes precedence over an abort: `abortOn` fires *because* a threshold
+failed, so that run exits 1 — the signal CI gates on — with `outcome: aborted` and
+`stoppedBy` recorded in the report.
 
 ## License
 

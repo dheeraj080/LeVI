@@ -1,0 +1,18 @@
+id: timed
+name: Timed checkout
+executor:
+  constantVus:
+    vus: 20
+    duration: 1m
+steps:
+  - request: corpus-request
+thresholds:
+  http_req_duration:
+    - p(95)<500
+    - p(99.9)<1500
+  http_req_failed:
+    - rate<0.01
+  http_reqs:
+    - count>0
+abortOn:
+  - http_req_failed

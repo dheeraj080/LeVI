@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use lev_core::{
     ApiKeyLocation, Assertion, Auth, Body, Collection, Executor, Method, RequestDef, Scenario,
-    Scripts, SecretName, Step, Template, VarSet, VarValue,
+    Scripts, SecretName, Step, Template, Threshold, ThresholdMetric, VarSet, VarValue,
 };
 
 use crate::dto::{
@@ -300,11 +300,40 @@ pub fn scenario_to_core(dto: ScenarioDto) -> Result<Scenario, FormatError> {
         ));
     }
 
+    let mut thresholds: Vec<Threshold> = Vec::new();
+    for (metric_name, expressions) in &dto.thresholds {
+        for expression in expressions {
+            thresholds.push(Threshold::parse(metric_name, expression).map_err(|error| {
+                FormatError::InvalidScenario(error.to_string())
+            })?);
+        }
+    }
+
+    let mut abort_on: Vec<ThresholdMetric> = Vec::new();
+    for name in &dto.abort_on {
+        let metric = ThresholdMetric::parse(name).ok_or_else(|| {
+            FormatError::InvalidScenario(format!(
+                "scenario: abortOn refers to unknown metric `{name}`"
+            ))
+        })?;
+        abort_on.push(metric);
+    }
+    for metric in &abort_on {
+        if !thresholds.iter().any(|t| t.metric == *metric) {
+            return Err(FormatError::InvalidScenario(format!(
+                "scenario: abortOn refers to metric `{}` but no threshold is defined for it",
+                metric
+            )));
+        }
+    }
+
     Ok(Scenario {
         id: dto.id,
         name: dto.name,
         executor,
         steps,
+        thresholds,
+        abort_on,
     })
 }
 
@@ -317,6 +346,20 @@ pub fn scenario_from_core(scenario: &Scenario) -> ScenarioDto {
             }),
         },
     };
+
+    let mut thresholds_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for threshold in &scenario.thresholds {
+        thresholds_map
+            .entry(threshold.metric.name().to_string())
+            .or_default()
+            .push(threshold.expression());
+    }
+    let abort_on: Vec<String> = scenario
+        .abort_on
+        .iter()
+        .map(|metric| metric.name().to_string())
+        .collect();
+
     ScenarioDto {
         id: scenario.id.clone(),
         name: scenario.name.clone(),
@@ -331,6 +374,8 @@ pub fn scenario_from_core(scenario: &Scenario) -> ScenarioDto {
                     .map(|duration| DurationDto::Text(format_duration(duration))),
             })
             .collect(),
+        thresholds: thresholds_map,
+        abort_on,
     }
 }
 

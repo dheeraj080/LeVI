@@ -17,6 +17,7 @@ pub mod redact;
 pub mod scenario;
 pub mod secrets;
 pub mod template;
+pub mod threshold;
 
 pub use assert::{Assertion, Check};
 pub use context::Context;
@@ -31,3 +32,4 @@ pub use redact::{Redactor, MASK};
 pub use scenario::{Executor, Scenario, Step};
 pub use secrets::{MapSecretStore, Secret, SecretName, SecretStore};
 pub use template::{DynamicFunctions, RenderContext, Template};
+pub use threshold::{Comparison, Threshold, ThresholdMetric, ThresholdStat};

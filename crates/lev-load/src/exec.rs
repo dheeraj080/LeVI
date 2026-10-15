@@ -5,6 +5,10 @@
 //! [`Context`] — so `{{$uuid}}` advances every iteration instead of repeating — and
 //! loops its steps until the run's deadline. Between steps it honours think time
 //! through the injected [`Clock`], so the whole loop can be driven in virtual time.
+//!
+//! A VU also watches a [`CancellationToken`], which is how a graceful stop works:
+//! the token goes off between steps, so the request in flight is allowed to finish and
+//! the VU leaves at the next safe point rather than being killed mid-send.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +16,7 @@ use std::time::Duration;
 use lev_core::secrets::SecretStore;
 use lev_core::{Context, VarSet};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::clock::Clock;
 use crate::metrics::WorkerMetrics;
@@ -21,7 +26,7 @@ use crate::sender::Sender;
 /// How often the aggregator flushes: 4 Hz, per the plan.
 pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Run `count` virtual users, numbered from `base_index`, until `deadline`.
+/// Run `count` virtual users, numbered from `base_index`, until `deadline` or a stop.
 ///
 /// Every task shares one [`WorkerMetrics`], so a worker's numbers are its own. The
 /// function returns once all its VUs have finished.
@@ -33,6 +38,7 @@ pub(crate) async fn run_vus(
     sender: Arc<dyn Sender>,
     clock: Arc<dyn Clock>,
     metrics: Arc<WorkerMetrics>,
+    cancel: CancellationToken,
     base_index: u32,
     count: u32,
     deadline: Instant,
@@ -51,6 +57,7 @@ pub(crate) async fn run_vus(
             Arc::clone(&sender),
             Arc::clone(&clock),
             Arc::clone(&metrics),
+            cancel.clone(),
         )));
     }
     for task in tasks {
@@ -71,6 +78,7 @@ async fn run_one_vu(
     sender: Arc<dyn Sender>,
     clock: Arc<dyn Clock>,
     metrics: Arc<WorkerMetrics>,
+    cancel: CancellationToken,
 ) {
     // Each VU gets its own seed, so two VUs never send the same `{{$uuid}}` stream.
     let seed = seed.wrapping_add(u64::from(index));
@@ -78,8 +86,15 @@ async fn run_one_vu(
     // functions differ every iteration (a fresh context per iteration would not).
     let mut ctx = Context::with_seed(vars, secrets.as_ref(), seed);
 
-    while clock.now() < deadline {
+    // The label is what makes a stop *graceful*: leaving between steps (rather than
+    // mid-send) means the request already in flight still counts, and an iteration that
+    // was cut short is not counted as a completed one.
+    'vu: while clock.now() < deadline && !cancel.is_cancelled() {
         for step in &scenario.steps {
+            if cancel.is_cancelled() {
+                break 'vu;
+            }
+
             let prepared = match step.request.prepare(&mut ctx) {
                 Ok(prepared) => prepared,
                 Err(_) => {
@@ -103,7 +118,12 @@ async fn run_one_vu(
                 // clock without the outer `while` ever seeing the clock move — an
                 // infinite spin. Clamping keeps a run terminating in virtual time too.
                 let wake = (clock.now() + think_time).min(deadline);
-                clock.sleep_until(wake).await;
+                // A stop during think time should end the wait, not be served after it:
+                // otherwise a long think time would look like a hung run on Ctrl-C.
+                tokio::select! {
+                    _ = clock.sleep_until(wake) => {}
+                    _ = cancel.cancelled() => break 'vu,
+                }
             }
         }
         metrics.record_iteration();
@@ -173,6 +193,8 @@ mod tests {
                 request: "ping".to_string(),
                 think_time,
             }],
+            thresholds: Vec::new(),
+            abort_on: Vec::new(),
         };
         Arc::new(CompiledScenario::compile(&scenario, &Collection::empty(), &requests).unwrap())
     }
@@ -200,6 +222,7 @@ mod tests {
             Arc::new(InstantSender),
             Arc::clone(&clock),
             Arc::clone(&metrics),
+            CancellationToken::new(),
             0,
             4,
             deadline,
@@ -241,6 +264,7 @@ mod tests {
             Arc::new(InstantSender),
             clock,
             Arc::clone(&metrics),
+            CancellationToken::new(),
             0,
             1,
             deadline,
@@ -281,6 +305,7 @@ mod tests {
             Arc::new(InstantSender),
             clock,
             Arc::clone(&metrics),
+            CancellationToken::new(),
             0,
             1,
             deadline,
