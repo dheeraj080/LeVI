@@ -8,6 +8,7 @@
 
 mod client;
 pub mod config;
+mod connector;
 pub mod error;
 pub mod timing;
 

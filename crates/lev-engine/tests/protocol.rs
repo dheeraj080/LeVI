@@ -89,6 +89,22 @@ async fn a_request_travels_through_the_protocol_and_comes_back() {
     assert_eq!(response.body, "{\"ok\":true}");
     assert_eq!(echo.method, "GET");
     assert!(!response.timings.total_ms.is_nan());
+    // This is the engine's first request to that target, so it is the request that
+    // opened the connection — and the connection's own phases come back across the
+    // boundary with it. A later request on a pooled connection would honestly report
+    // them as absent instead; that case is in `lev-http`.
+    assert!(
+        response.timings.dns_ms.is_some(),
+        "the lookup was part of this request"
+    );
+    assert!(
+        response.timings.connect_ms.is_some(),
+        "the connect was part of this request"
+    );
+    assert!(
+        response.timings.tls_ms.is_none(),
+        "plain http has no handshake"
+    );
 
     client.stop(true).await.expect("stop");
     drop(client);

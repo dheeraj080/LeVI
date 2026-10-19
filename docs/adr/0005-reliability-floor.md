@@ -122,11 +122,25 @@ attempt that answered; the waits in between are not the server's latency.
 policy is set by whoever runs the command, is forced off in the load spine, and is
 counted where a user can see it.
 
+### 5. Connection phases are measured at the connector, and only when it was used
+
+`dnsMs`, `connectMs` and `tlsMs` existed on the wire before they existed in the client,
+and stayed omitted until a connector could measure them. A pooled client establishes a
+connection once and reuses it, so the phases are a property of a *connection*: a request
+served from the pool reports none of them, and reporting zero would be a measurement-
+shaped lie. When a request does open a connection, it reports what that cost, split at
+the one seam that can see each phase — the resolver for DNS, the plain connector for
+TCP, the TLS connector for the handshake, with the handshake measured as the span the
+plain connector did not already claim.
+
+The carrier is a task-local rather than a field, because attribution is the whole
+problem: a connector may be polled on a task other than the request that made it, and a
+task-local can only ever be read by the task that installed it. Two requests that share
+one connection therefore never both claim its phases, and a request that merely waited
+for somebody else's connection claims nothing at all.
+
 ## Deferred, on the record
 
-- **Instrumented connector timings** (`dnsMs`, `connectMs`, `tlsMs`): the fields exist on
-  the wire and stay omitted until a connector that can measure the phases lands.
-  `totalMs`, `ttfbMs` and `receiveMs` are real today.
 - **OS keychain secrets**: secrets come from `LEVI_SECRET_*` environment variables only.
 - **`serve`-wide defaults** (`levi serve` has no `--timeout`/`--retries` of its own): a
   serve-wide default belongs in `levi.toml` with the rest of the project config, not in

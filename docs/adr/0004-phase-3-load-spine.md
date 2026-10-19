@@ -31,7 +31,8 @@ reporter.
 Explicitly deferred, and named here so the gaps are on the record rather than
 discovered: open/ramping executors, coordinated-omission correction, thresholds and
 `abortOn`, graceful stop beyond the planned duration, scripts and assertions under load,
-run persistence, instrumented DNS/connect/TLS timings, and `levi selftest`.
+run persistence, instrumented DNS/connect/TLS timings (landed afterwards, ADR 0005 §5),
+and `levi selftest`.
 
 The consequence is honest and user-visible: a completed run exits `0` even if requests
 failed, because "failed" only means something once thresholds exist to define it. The

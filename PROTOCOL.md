@@ -185,8 +185,10 @@ and the client decides what a failed check means (the CLI exits `1`).
 UI renders as "what went out", and it never contains a secret. The echo is computed
 *after* the pre-request script, so it reflects any rewrite the script made.
 
-`timings` carries milliseconds. `dnsMs`, `connectMs` and `tlsMs` are omitted until the
-instrumented connector lands.
+`timings` carries milliseconds. `dnsMs`, `connectMs` and `tlsMs` describe the
+**connection** rather than the request, so they are present only when this request opened
+one: a pooled connection has nothing to say, and its phases are omitted rather than
+reported as zero. `tlsMs` is absent for plain `http`.
 
 `attempts` is how many times the client sent the request before this response came back.
 It is `1` unless the client was configured to retry a transient failure (`429`, `502`,

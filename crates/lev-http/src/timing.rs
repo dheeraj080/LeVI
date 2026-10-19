@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Per-phase request timing.
 //!
-//! Phase 0 measures the phases the pooled high-level client can see: total, time to
-//! first byte (response headers), and receive. DNS / connect / TLS need the
-//! instrumented connector and are populated in Phase 1; until then they are `None`
-//! and printed as `n/a`.
+//! Three phases describe the exchange (total, time to first byte, receive) and three
+//! describe the *connection* (dns, connect, tls). The connection phases are present
+//! only when this request opened a connection: a pooled client reuses one, and a
+//! request served from the pool reports them as `None` rather than as zero. What that
+//! means is documented on the connector module that measures them.
 
 use std::fmt;
 use std::time::Duration;
@@ -17,11 +18,11 @@ pub struct Timings {
     pub ttfb: Duration,
     /// Reading the response body.
     pub receive: Duration,
-    /// DNS resolution (Phase 1 connector instrumentation).
+    /// DNS resolution. Absent when this request did not resolve anything.
     pub dns: Option<Duration>,
-    /// TCP connect (Phase 1 connector instrumentation).
+    /// TCP connect. Absent when this request reused a pooled connection.
     pub connect: Option<Duration>,
-    /// TLS handshake (Phase 1 connector instrumentation).
+    /// TLS handshake. Absent for a reused connection, or for plain `http`.
     pub tls: Option<Duration>,
 }
 

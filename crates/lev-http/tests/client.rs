@@ -86,6 +86,70 @@ async fn gets_a_response_and_records_timing() {
 }
 
 #[tokio::test]
+async fn the_first_request_reports_the_connection_it_opened() {
+    // The client has no connection yet, so this request does the work and the report
+    // says so: resolving and connecting happened, and there was no TLS to do over
+    // plain http. Both phases are real spans that fit inside the whole exchange —
+    // a phase that outlived the request would be the instrumentation lying.
+    let address = start_echo_server().await;
+    let client = HttpClient::new().unwrap();
+
+    let response = client
+        .send(request(
+            Method::Get,
+            format!("http://{address}/timed"),
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    let timings = response.timings;
+    let dns = timings.dns.expect("this request did the resolving");
+    let connect = timings.connect.expect("this request did the connecting");
+    assert!(timings.tls.is_none(), "plain http has no handshake to time");
+    assert!(
+        dns + connect <= timings.total,
+        "dns {dns:?} + connect {connect:?} overran the request {:?}",
+        timings.total
+    );
+}
+
+#[tokio::test]
+async fn a_reused_connection_says_nothing_about_connecting() {
+    // The second request is served from the pool: it neither resolved nor connected.
+    // Reporting those phases as zero would read as "it cost nothing", which is a
+    // different claim from "it did not happen" — so they are absent, while the
+    // exchange phases the request really has are still there.
+    let address = start_echo_server().await;
+    let client = HttpClient::new().unwrap();
+
+    client
+        .send(request(
+            Method::Get,
+            format!("http://{address}/warm"),
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let reused = client
+        .send(request(
+            Method::Get,
+            format!("http://{address}/reused"),
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    assert!(reused.timings.dns.is_none(), "no lookup, no claim");
+    assert!(reused.timings.connect.is_none(), "no connect, no claim");
+    assert!(reused.timings.tls.is_none());
+    assert!(
+        reused.timings.total > Duration::ZERO,
+        "the request itself still has timings to report"
+    );
+}
+
+#[tokio::test]
 async fn posts_a_body() {
     let address = start_echo_server().await;
     let client = HttpClient::new().unwrap();

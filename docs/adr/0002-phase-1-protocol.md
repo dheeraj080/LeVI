@@ -92,6 +92,8 @@ distinction. `sendRequest` never fails on status.
 
 - OS-keychain `SecretStore` (secrets still come from `LEVI_SECRET_<NAME>`).
 - Instrumented connector timings (`dnsMs` / `connectMs` / `tlsMs` are still absent).
+  **Done later:** they are measured at the connector now, and reported only by a
+  request that opened a connection — see ADR 0005 §5.
 - The `env` DTO carries the **merged** `collection < environment` scope, with the merge
   done by the client. Precedence merging is trivial config assembly, but if it grows
   (runtime/iteration scopes, §4.8) it should move server-side.

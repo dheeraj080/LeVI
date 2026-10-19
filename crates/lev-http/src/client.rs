@@ -16,18 +16,17 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Request, Response as HyperResponse};
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 
 use lev_core::{Method, PreparedRequest};
 
 use crate::config::ClientConfig;
+use crate::connector::{measuring, TimedHttpsConnector};
 use crate::error::HttpError;
 use crate::timing::Timings;
 
-type Connector = HttpsConnector<HttpConnector>;
+type Connector = TimedHttpsConnector;
 type RequestBody = Full<Bytes>;
 
 /// A pooled HTTP/1.1 + HTTP/2 client.
@@ -74,15 +73,7 @@ impl HttpClient {
     /// deadline that matters is the one the request carries, falling back to the
     /// config's.
     pub fn with_config(config: ClientConfig) -> Result<Self, HttpError> {
-        let mut http = HttpConnector::new();
-        http.set_connect_timeout(Some(config.connect_timeout));
-        let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|error| HttpError::Tls(error.to_string()))?
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .wrap_connector(http);
+        let connector = TimedHttpsConnector::new(config.connect_timeout)?;
 
         let mut builder = Client::builder(TokioExecutor::new());
         builder.pool_idle_timeout(config.pool_idle_timeout);
@@ -168,7 +159,11 @@ impl HttpClient {
                 .map_err(|error| HttpError::Body(error.to_string()))?;
             Ok::<_, HttpError>((parts, collected.to_bytes(), ttfb))
         };
-        let (parts, body, ttfb) = await_deadline(exchange, deadline).await?;
+        // Wrapped, not awaited directly: the connector records the phases of the
+        // connection this request opens *into this task's cell*, which is the only
+        // way they can be attributed to the request that opened it.
+        let (exchanged, phases) = measuring(await_deadline(exchange, deadline)).await;
+        let (parts, body, ttfb) = exchanged?;
         let total = start.elapsed();
 
         let headers = parts
@@ -187,7 +182,7 @@ impl HttpClient {
             version: format!("{:?}", parts.version),
             headers,
             body,
-            timings: timings_since(ttfb, total),
+            timings: timings_since(ttfb, total, phases),
             attempts: attempt,
         })
     }
@@ -275,13 +270,14 @@ impl HttpClient {
             }
             Ok::<_, HttpError>((parts, body_len, ttfb))
         };
-        let (parts, body_len, ttfb) = await_deadline(exchange, deadline).await?;
+        let (exchanged, phases) = measuring(await_deadline(exchange, deadline)).await;
+        let (parts, body_len, ttfb) = exchanged?;
         let total = start.elapsed();
 
         Ok(LoadResponse {
             status: parts.status.as_u16(),
             body_len,
-            timings: timings_since(ttfb, total),
+            timings: timings_since(ttfb, total, phases),
         })
     }
 
@@ -323,14 +319,21 @@ fn build_request(request: PreparedRequest) -> Result<Request<RequestBody>, HttpE
         .map_err(|error| HttpError::InvalidHeader(error.to_string()))
 }
 
-fn timings_since(ttfb: std::time::Duration, total: std::time::Duration) -> Timings {
+/// Assemble the timings of one attempt.
+///
+/// `phases` is what the connector recorded for the connection this request opened:
+/// nothing at all when it was served from the pool, which is the common case and the
+/// honest answer. See [`crate::connector`] for how that attribution is made.
+fn timings_since(
+    ttfb: std::time::Duration,
+    total: std::time::Duration,
+    phases: Option<Timings>,
+) -> Timings {
     Timings {
         total,
         ttfb,
         receive: total.saturating_sub(ttfb),
-        dns: None,
-        connect: None,
-        tls: None,
+        ..phases.unwrap_or_default()
     }
 }
 
