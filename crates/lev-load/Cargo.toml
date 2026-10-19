@@ -21,6 +21,7 @@ tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros", "ti
 # `CancellationToken` is the stop signal every VU watches; `rt` turns on the `sync`
 # module and the `futures-util` it is built on (already in the tree via hyper).
 tokio-util = { version = "0.7.20", features = ["rt"] }
+tracing = "0.1.44"
 
 [dev-dependencies]
 tokio = { version = "1.53.2", features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }

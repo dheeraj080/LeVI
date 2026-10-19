@@ -179,6 +179,7 @@ impl Engine {
                 engine: ENGINE_VERSION.to_string(),
             })
             .await?;
+        tracing::info!(version = %version, engine = ENGINE_VERSION, "session ready");
 
         loop {
             let message = tokio::select! {
@@ -190,10 +191,12 @@ impl Engine {
                 next = transport.recv() => next?,
             };
             let Some(message) = message else {
+                tracing::info!(reason = "stream closed", "engine session ending");
                 return Ok(());
             };
             match message {
                 Message::SendRequest { request, env } => {
+                    tracing::debug!(name = %request.name, "dispatching request");
                     let reply = match self.dispatch(request, env).await {
                         Ok(dispatch) => Message::RequestResult {
                             request: dispatch.echo,
@@ -242,6 +245,10 @@ impl Engine {
     /// The pipe may already be gone (the parent exited, the client closed it); a
     /// failed send must not turn a clean stop into an error.
     async fn note_shutdown<T: Transport>(&self, transport: &mut T, cause: &str) {
+        // Both records of the same fact: the peer learns it on the wire, and whoever
+        // is watching the process learns it on stderr — they are different audiences
+        // and neither should have to guess.
+        tracing::info!(reason = cause, "engine session ending");
         let _ = transport
             .send(Message::Log {
                 level: LogLevel::Info,

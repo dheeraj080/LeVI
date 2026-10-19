@@ -84,6 +84,11 @@ unless asked for, on idempotent methods only, and never on `levi run`, whose rep
 count every request the target saw. The reasoning is in
 [`docs/adr/0005-reliability-floor.md`](docs/adr/0005-reliability-floor.md).
 
+Operational logs - a retry, an `abortOn` firing, a session starting and ending - go to
+**stderr**, never to stdout, which belongs to the result and to `serve`'s NDJSON channel.
+They are quiet by default (`warn`); `LEVI_LOG=info`, `LEVI_LOG=debug` or
+`LEVI_LOG=lev_http=debug` turn them on.
+
 `levi run` compiles a scenario against the collection, then drives it with the load
 engine: worker threads, each running a pool of virtual users, feeding per-worker HDR
 histograms that the aggregator merges four times a second. It prints requests, failures,

@@ -28,7 +28,7 @@
 //!
 //! # What slice 2 adds
 //!
-//! Thresholds and the verdict they produce ([`crate::threshold`]), the live `abortOn`
+//! Thresholds and the verdict they produce, the live `abortOn`
 //! rule that stops a run as soon as it is failing, and a graceful stop: a
 //! [`CancellationToken`] every VU checks, so Ctrl-C (or `abortOn`) ends the run with a
 //! partial report flagged `aborted` instead of a hard kill.
@@ -216,6 +216,13 @@ pub async fn run_with(
         .map(|_| Arc::new(WorkerMetrics::new()))
         .collect();
     let counts = distribute(scenario.vus, workers);
+    tracing::info!(
+        scenario = %scenario.id,
+        vus = scenario.vus,
+        workers,
+        duration_s = scenario.duration.as_secs(),
+        "load run starting"
+    );
 
     let mut handles = Vec::with_capacity(workers);
     let mut base_index = 0u32;
@@ -288,6 +295,10 @@ pub async fn run_with(
                 stop_reason = Some(StopReason::Threshold {
                     metric: metric.name().to_string(),
                 });
+                tracing::warn!(
+                    metric = metric.name(),
+                    "abortOn fired: the run is failing, stopping early"
+                );
                 cancel.cancel();
                 break;
             }
@@ -343,6 +354,14 @@ pub async fn run_with(
     for reporter in reporters.iter_mut() {
         reporter.on_finish(&report)?;
     }
+    tracing::info!(
+        outcome = ?report.outcome,
+        duration_s = duration.as_secs_f64(),
+        requests = report.http_reqs,
+        failed = report.http_req_failed,
+        iterations = report.iterations,
+        "load run finished"
+    );
     Ok(report)
 }
 

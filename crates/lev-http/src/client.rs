@@ -145,6 +145,7 @@ impl HttpClient {
         attempt: u32,
     ) -> Result<Response, HttpError> {
         let deadline = self.deadline_for(&request);
+        tracing::debug!(method = request.method.as_str(), attempt, "sending request");
         let outgoing = build_request(request)?;
 
         let start = Instant::now();
@@ -177,14 +178,21 @@ impl HttpClient {
             })
             .collect();
 
-        Ok(Response {
+        let response = Response {
             status: parts.status.as_u16(),
             version: format!("{:?}", parts.version),
             headers,
             body,
             timings: timings_since(ttfb, total, phases),
             attempts: attempt,
-        })
+        };
+        tracing::debug!(
+            status = response.status,
+            attempts = response.attempts,
+            total_ms = response.timings.total.as_millis() as u64,
+            "request answered"
+        );
+        Ok(response)
     }
 
     /// How many attempts this client is allowed to make for `request`.
@@ -218,13 +226,19 @@ impl HttpClient {
             return None;
         }
 
-        let server_wait = match outcome {
+        let (server_wait, reason) = match outcome {
             Outcome::Response(response) if is_transient_status(response.status) => {
-                parse_retry_after(&response.headers)
-                    .map(|wait| wait.min(self.config.retry_after_max))
+                let wait = parse_retry_after(&response.headers)
+                    .map(|wait| wait.min(self.config.retry_after_max));
+                // The status is safe to say out loud; headers and body are not the
+                // transport's to print, and a log line must never become a way around
+                // the redaction the engine does.
+                (wait, format!("status {}", response.status))
             }
             Outcome::Response(_) => return None,
-            Outcome::Failure(error) if is_transient_error(error) => None,
+            Outcome::Failure(error) if is_transient_error(error) => {
+                (None, transient_kind(error).to_string())
+            }
             Outcome::Failure(_) => return None,
         };
 
@@ -233,7 +247,15 @@ impl HttpClient {
             .retry_backoff
             .saturating_mul(1u32 << (attempt - 1).min(16))
             .min(self.config.retry_backoff_max);
-        Some(server_wait.map_or(backoff, |wait| wait.max(backoff)))
+        let pause = server_wait.map_or(backoff, |wait| wait.max(backoff));
+        tracing::warn!(
+            attempt,
+            max_attempts,
+            wait_ms = pause.as_millis() as u64,
+            reason = %reason,
+            "transient failure, asking again"
+        );
+        Some(pause)
     }
 
     /// Send a resolved request, counting and discarding the response body.
@@ -248,6 +270,11 @@ impl HttpClient {
     /// quietly call the slowest of them "the" latency. The load sender builds its
     /// client with retries pinned to zero, so this is a property of the spine rather
     /// than a convention somebody has to remember.
+    ///
+    /// It logs nothing per request either. At ten thousand a second a line per request
+    /// is noise nobody can read, and the run's own counters are the record of what
+    /// happened; the events worth a line at that rate (a run starting, a threshold
+    /// failing) are logged where they are decided, not here.
     pub async fn send_discarding(
         &self,
         request: PreparedRequest,
@@ -364,6 +391,19 @@ fn is_transient_error(error: &HttpError) -> bool {
         error,
         HttpError::Request(_) | HttpError::Body(_) | HttpError::Timeout { .. }
     )
+}
+
+/// A fixed label for *why* a send is being retried.
+///
+/// The error's own `Display` can carry the URL, and a URL can carry a token in its
+/// query, so a log line logs the class of the failure instead of the message: enough
+/// to diagnose, nothing that could route around the engine's redaction.
+fn transient_kind(error: &HttpError) -> &'static str {
+    match error {
+        HttpError::Timeout { .. } => "deadline exceeded",
+        HttpError::Body(_) => "response body interrupted",
+        _ => "connection failed",
+    }
 }
 
 /// Whether `method` is safe to send twice (RFC 9110 §9.2.2).

@@ -123,7 +123,6 @@ policy is set by whoever runs the command, is forced off in the load spine, and 
 counted where a user can see it.
 
 ### 5. Connection phases are measured at the connector, and only when it was used
-
 `dnsMs`, `connectMs` and `tlsMs` existed on the wire before they existed in the client,
 and stayed omitted until a connector could measure them. A pooled client establishes a
 connection once and reuses it, so the phases are a property of a *connection*: a request
@@ -139,6 +138,21 @@ task-local can only ever be read by the task that installed it. Two requests tha
 one connection therefore never both claim its phases, and a request that merely waited
 for somebody else's connection claims nothing at all.
 
+### 6. Logs go to stderr, because stdout belongs to something else
+
+`levi serve`'s stdout is a machine channel (NDJSON), and every other command prints its
+result there, so the log subscriber is built with an explicit stderr writer instead of a
+default: a stray line on stdout does not merely degrade the log, it corrupts a protocol
+somebody else is parsing. The level is a `tracing` filter — `LEVI_LOG`, falling back to
+`RUST_LOG` — and the default is `warn`, so a working tool is silent. What breaks that
+silence is worth a line: a retry, an `abortOn` firing, a session starting and ending.
+
+Two kinds of line are deliberately *not* emitted. The load path logs nothing per request:
+ten thousand a second is noise nobody can read, and the run's own counters are the record.
+And a transport failure is logged as a fixed classification rather than as the error's
+own message, because a message can carry the URL and a URL can carry a token — a log line
+must never be a way around the redaction the engine does.
+
 ## Deferred, on the record
 
 - **OS keychain secrets**: secrets come from `LEVI_SECRET_*` environment variables only.
@@ -146,8 +160,5 @@ for somebody else's connection claims nothing at all.
   serve-wide default belongs in `levi.toml` with the rest of the project config, not in
   a second flag with different precedence rules.
 - **Zero deadlines in a collection file** are not rejected; only the flag is.
-- **Structured logging** to stderr (stdout is the NDJSON serve channel, so this is where
-  it must go) is not implemented; the engine still logs through the protocol `log`
-  message.
 - **Coordinated-omission correction**, **open/ramping executors**, **scripts and
   assertions under load** - Phase 3 work, see ADR 0004.

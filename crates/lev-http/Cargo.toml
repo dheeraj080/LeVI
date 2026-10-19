@@ -18,3 +18,4 @@ lev-core = { version = "0.0.0", path = "../lev-core" }
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
 tower-service = "0.3.1"
+tracing = "0.1.44"

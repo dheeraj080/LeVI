@@ -48,7 +48,12 @@ const EXIT_ABORTED: u8 = 4;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    init_logging();
     let args: Vec<String> = env::args().skip(1).collect();
+    tracing::debug!(
+        command = args.first().map(String::as_str).unwrap_or("(none)"),
+        "levi starting"
+    );
     match run(&args).await {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
         Err(fail) => {
@@ -56,6 +61,30 @@ async fn main() -> ExitCode {
             ExitCode::from(fail.code)
         }
     }
+}
+
+/// Install the process-wide log subscriber, before anything has a chance to log.
+///
+/// **Logs go to stderr, always.** That is not a preference: stdout is `levi serve`'s
+/// NDJSON channel and the output the other commands print, and one stray line there
+/// would corrupt both — so the writer is set explicitly instead of left to a default.
+///
+/// The level is a `tracing` filter from `LEVI_LOG` (falling back to `RUST_LOG`), so
+/// `LEVI_LOG=info` or `LEVI_LOG=lev_http=debug` both work. The default is `warn`: a
+/// tool that is working should say nothing, while a retry, a refused connection or an
+/// early abort is worth a line. ANSI is enabled only when stderr is a terminal, so
+/// logs captured by CI stay plain text.
+fn init_logging() {
+    use std::io::IsTerminal;
+
+    let spec = env::var("LEVI_LOG")
+        .or_else(|_| env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "warn".to_string());
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(spec))
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
 }
 
 fn usage() -> String {
@@ -105,6 +134,11 @@ EXIT CODES:
     2  configuration or usage error
     3  engine error
     4  aborted (Ctrl-C or `abortOn`) with no failed threshold
+
+LOGGING:
+    Logs go to stderr — never to stdout, which belongs to the printed result and to
+    `serve`'s NDJSON channel. Set LEVI_LOG to a filter such as `info`, `debug` or
+    `lev_http=debug` (RUST_LOG works too) [default: warn]
 
 Secrets are read from environment variables named LEVI_SECRET_<NAME>. The engine
 redacts secret values before anything is printed or crosses the protocol. Pre- and
@@ -389,6 +423,9 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
     }
 
     let report = lev_load::run(config, &mut reporters).await?;
+    if let Some(path) = options.out.as_deref() {
+        tracing::debug!(path = %path.display(), "report written");
+    }
 
     if !options.quiet {
         print_report(&report, options.out.as_deref());
