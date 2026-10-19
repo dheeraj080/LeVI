@@ -86,7 +86,7 @@ pub struct RunConfig {
     pub run_id: RunId,
     /// The scenario, already bound to compiled requests.
     pub scenario: Arc<CompiledScenario>,
-    /// The merged variable scope (global < collection < environment).
+    /// The merged variable scope (collection < environment).
     pub vars: VarSet,
     /// Where secrets are read from. Never serialized.
     pub secrets: Arc<dyn SecretStore>,

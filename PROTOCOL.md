@@ -64,18 +64,25 @@ a spawned run machine-readable.
 | `log` | engine → client | A redacted log line |
 | `error` | engine → client | A failure; `code` is the contract |
 
-Direction is enforced by the receiver. A message that arrives the wrong way
-produces `error` (`code: "unsupported"`) and **the session continues**.
+Direction is enforced by the receiver. Once the handshake has succeeded, a message that
+arrives the wrong way, or one this build does not know, produces `error`
+(`code: "unsupported"`) and **the session continues** — as does a line that is not a
+protocol message at all, which is answered with `badMessage` and costs only that line,
+because the framing is one message per line. Before the handshake the rule is stricter: the
+first message must be `hello`, and anything else is `badMessage` and the session ends.
 
 ### `hello`
 
 ```json
-{ "type": "hello", "protocolVersion": { "major": 0, "minor": 2 },
+{ "type": "hello", "protocolVersion": { "major": 0, "minor": 3 },
   "capabilities": ["interactive"] }
 ```
 
-Capabilities: `interactive`, `load`, `graphql`, `grpc`. A client must not rely on a
-capability the engine did not advertise.
+Capabilities: `interactive`, `load`, `graphql`, `grpc`. `hello` carries what the **client**
+can speak; the engine advertises nothing yet, because it implements exactly one mode and
+there is nothing to choose between. A client must not rely on a capability the engine did
+not advertise — which, today, is every one of them. A capability becomes an engine-side
+advertisement in `ready` the day one of them is optional.
 
 ### `ready`
 
@@ -120,7 +127,8 @@ them. `env.vars` is the already-merged `collection < environment` scope; `baseUr
 (`baseUrl` resolves a relative request URL; request-level auth wins).
 
 Body kinds: `json { content }`, `form { fields: [{ name, value }] }`,
-`raw { contentType?, content }`, `file { path }`.
+`raw { contentType?, content }`, `file { path }`, and (v0.3) `bytes { contentType?,
+base64 }`.
 
 Auth kinds: `bearer { token }`, `basic { username, password }`,
 `apiKey { name, value, location }` where `location` is `header` (default) or `query`.
@@ -176,10 +184,11 @@ child the user spawned themselves — never to a remote agent.
 }
 ```
 
-`checks` are the declarative assertions plus any `lev.test(...)` outcomes, in order;
-`logs` are the script's `lev.log` lines. Both are **redacted** and both are omitted when
-empty. A failed check is not an `error`: the `requestResult` still carries the response,
-and the client decides what a failed check means (the CLI exits `1`).
+`checks` are the `lev.test(...)` outcomes the scripts recorded, followed by the declarative
+assertions, in that order; `logs` are the script's `lev.log` lines. Both are **redacted**
+and both are omitted when empty. A failed check is not an `error`: the `requestResult`
+still carries the response, and the client decides what a failed check means (the CLI
+exits `1`).
 
 `request` is the request **as actually sent** - resolved, and redacted. This is what a
 UI renders as "what went out", and it never contains a secret. The echo is computed
@@ -192,10 +201,11 @@ reported as zero. `tlsMs` is absent for plain `http`.
 
 `attempts` is how many times the client sent the request before this response came back.
 It is `1` unless the client was configured to retry a transient failure (`429`, `502`,
-`503`, `504`, a refused connection, a reset, a deadline) *and* the method was safe to
-send twice; a `3` therefore says "two refusals happened before this one, and the report
-is not hiding them". `timings` describes the attempt that answered, not the waits in
-between. A peer that predates v0.3 omits the field, and its absence means `1`.
+`503`, `504`, a refused connection, a reset, a response body that stopped part-way, a
+deadline) *and* the method was safe to send twice; a `3` therefore says "two refusals
+happened before this one, and the report is not hiding them". `timings` describes the
+attempt that answered, not the waits in between. A peer that predates v0.3 omits the
+field, and its absence means `1`.
 
 ### `stop`
 
@@ -235,7 +245,7 @@ Error codes:
 | `code` | Meaning |
 |---|---|
 | `protocolVersionMismatch` | Major versions differ |
-| `badMessage` | Not parseable as a protocol message, or out of order |
+| `badMessage` | Not parseable as a protocol message, or out of order; after the handshake the session continues, but a first message that is not `hello` ends it |
 | `config` | The request, collection, environment **or script** is invalid (a script that fails to compile, throws, runs away, or exhausts memory lands here) |
 | `engine` | The request could not be sent (transport, TLS, DNS, timeout) |
 | `unsupported` | Valid, but not implemented by this build |
@@ -251,11 +261,12 @@ Clients branch on `code`, never on `msg`.
    check name, check message and script log** - is redacted by the engine *before* it is
    serialized. A target that reflects a token back, or a script that logs one, cannot
    leak it to a client.
-2. **Aggregates, not samples.** Interactive responses are buffered; load-mode
-   snapshots (Phase 3) carry aggregates only.
+2. **Aggregates, not samples.** Interactive responses are buffered; the load-mode
+   snapshot messages (reserved — §6) carry aggregates only.
 3. **A rejected handshake is explicit.** One `error`, then a clean close.
-4. **A protocol mistake is survivable.** A wrong-direction or unknown message yields
-   `error` and the session continues.
+4. **A protocol mistake is survivable.** After the handshake, a wrong-direction, unknown or
+   unparseable message yields `error` and the session continues. Before it, a first message
+   that is not `hello` is `badMessage` and the session closes.
 
 ## 6. Reserved — not in v0
 
@@ -277,7 +288,8 @@ exists. The envelope is already designed to carry them.
 - `crates/lev-script/tests/sandbox.rs` - the sandbox itself: request mutation, checks,
   the `lev.*` surface, seeded reproducibility, and both limits.
 - `crates/lev-cli/tests/stdio.rs` - the same conversation with the **real binary**
-  spawned as a child process, over NDJSON.
+  spawned as a child process, over NDJSON, including a garbled line that is answered with
+  `badMessage` while the session stays alive.
 - `crates/lev-cli/tests/checks.rs` - checks and the exit-code contract (`0` pass, `1`
   check failed, `2` broken script) through the real binary.
 
@@ -290,8 +302,8 @@ exists. The envelope is already designed to carry them.
 | `requestResult.checks` | engine -> client | assertion + `lev.test` outcomes, redacted |
 | `requestResult.logs` | engine -> client | `lev.log` lines, redacted |
 
-`PROTOCOL_VERSION` is `0.2`. A script failure is reported as `error` with
-`code: "config"` — no new error code was introduced.
+`PROTOCOL_VERSION` moved to `0.2` in this bump (`0.3` today — see §9). A script failure is
+reported as `error` with `code: "config"` — no new error code was introduced.
 
 ## 9. Changes in v0.3
 

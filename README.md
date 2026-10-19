@@ -7,18 +7,18 @@ separate load-testing tool and no rewriting requests in k6 syntax: the same requ
 the same scripts, the same environment — fired once for interactive debugging, or tens
 of thousands of times per second for a load run.
 
-> **Status: Phase 3 (load testing, first slice).** The engine is built as a standalone
+> **Status: Phase 3 (load testing).** The engine is built as a standalone
 > Rust CLI first, per the build plan. `levi request` works end to end *through the
 > protocol boundary*, with real HTTP, per-phase timing, and secrets redacted inside the
-> engine; `levi serve --stdio` speaks the same protocol over NDJSON. Protocol v0.2 is
+> engine; `levi serve --stdio` speaks the same protocol over NDJSON. Protocol v0.3 is
 > frozen - see [`PROTOCOL.md`](PROTOCOL.md). Requests may carry JavaScript pre/post hooks
 > and declarative assertions, run in a sandboxed QuickJS runtime with a CPU budget and a
 > memory limit; a runaway script fails one request and never hangs the run. `levi run`
-> now drives a closed (constant-VU) load scenario, reports per-worker HDR percentiles,
-> and judges the run against a scenario's `thresholds` — a failed one exits 1, `abortOn`
-> stops the run as soon as it fails, and Ctrl-C ends it gracefully with a partial report.
-> Still to come in Phase 3: open/ramping executors, coordinated-omission correction,
-> more reporters, and `levi selftest`.
+> drives a closed (constant-VU) load scenario, reports percentiles merged from per-worker
+> HDR histograms, and judges the run against a scenario's `thresholds` — a failed one
+> exits 1, `abortOn` stops the run as soon as it fails, and Ctrl-C ends it gracefully with
+> a partial report. Still to come in Phase 3: open/ramping executors, coordinated-omission
+> correction, scripts and assertions under load, more reporters, and `levi selftest`.
 
 ## Layout
 
@@ -33,7 +33,9 @@ crates/
   lev-load/      the load engine: executors, per-worker HDR metrics, reporters
   lev-metrics/   the metric shapes: MetricSnapshot, RunReport, k6-compatible names
   lev-cli/       the `levi` binary
+docs/adr/        architecture decision records (the reasoning behind the design)
 examples/smoke/ a runnable collection
+scripts/         developer helpers (a local echo server)
 spec/            the public collection-format spec + conformance corpus
 ```
 
@@ -97,6 +99,11 @@ throughput, and latency percentiles, and writes the same numbers as JSON with `-
 The scenario format is in [`spec/README.md`](spec/README.md); the design is in
 [`docs/adr/0004-phase-3-load-spine.md`](docs/adr/0004-phase-3-load-spine.md).
 
+Every claim in [`spec/README.md`](spec/README.md) and [`PROTOCOL.md`](PROTOCOL.md) is meant
+to be true of the code — a spec that promises more than the tool does is a bug in one of
+them. The places they had drifted, and the fixes on both sides, are in
+[`docs/adr/0006-honesty-floor.md`](docs/adr/0006-honesty-floor.md).
+
 ## Development
 
 ```sh
@@ -124,5 +131,6 @@ failed, so that run exits 1 — the signal CI gates on — with `outcome: aborte
 ## License
 
 Dual-licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at
-your option. The collection format spec in `spec/` is licensed permissively so it can
-become a standard. Contributions are accepted under the same terms.
+your option. The collection format spec in `spec/` is covered by the same dual license, so
+the format can be implemented freely and can grow into a standard. Contributions are
+accepted under the same terms.

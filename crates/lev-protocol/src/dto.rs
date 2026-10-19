@@ -198,9 +198,9 @@ pub struct RequestDto {
 /// The scope a request is resolved against.
 ///
 /// This is the collection defaults plus the selected environment overlay, already
-/// merged by the client into the precedence order
-/// `global < collection < environment`. The engine still owns template resolution,
-/// secret resolution and auth application — this DTO only carries configuration.
+/// merged by the client, the environment winning. The engine still owns template
+/// resolution, secret resolution and auth application — this DTO only carries
+/// configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvDto {

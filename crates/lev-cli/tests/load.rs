@@ -308,6 +308,76 @@ async fn ctrl_c_stops_a_run_with_a_partial_report() {
         Some(4),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stdout.contains("aborted"), "stdout:\n{stdout}");
     assert!(stderr.contains("run aborted"), "stderr:\n{stderr}");
+}
+
+#[tokio::test]
+async fn validate_reads_the_load_scenarios_too() {
+    let dir = scratch_dir("validate-scenario");
+    write_collection(&dir, "http://127.0.0.1:1");
+    std::fs::write(
+        dir.join("requests/thing.yaml"),
+        "id: thing\nname: A thing\nmethod: GET\nurl: /thing\n",
+    )
+    .expect("write request");
+    std::fs::write(
+        dir.join("load/ok.yaml"),
+        "id: ok\nname: Ok\nexecutor:\n  constantVus:\n    vus: 1\n    duration: 1s\nsteps:\n  - request: thing\n",
+    )
+    .expect("write scenario");
+
+    // A scenario with a threshold no run can measure is a parse error, not a rule that
+    // would pass against zero forever.
+    std::fs::write(
+        dir.join("load/unmeasured.yaml"),
+        "id: bad\nname: Bad\nexecutor:\n  constantVus:\n    vus: 1\n    duration: 1s\nsteps:\n  - request: thing\nthresholds:\n  checks_failed:\n    - count==0\n",
+    )
+    .expect("write scenario");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_levi"))
+        .args(["validate", "."])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("run levi validate");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unmeasured.yaml"), "{stderr}");
+    assert!(stderr.contains("not measured under load"), "{stderr}");
+
+    // A step that names a request nobody wrote is the other cross-file mistake, and the
+    // one that would otherwise only surface once a run had started.
+    std::fs::remove_file(dir.join("load/unmeasured.yaml")).unwrap();
+    std::fs::write(
+        dir.join("load/dangling.yaml"),
+        "id: dangling\nname: Dangling\nexecutor:\n  constantVus:\n    vus: 1\n    duration: 1s\nsteps:\n  - request: absent\n",
+    )
+    .expect("write scenario");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_levi"))
+        .args(["validate", "."])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("run levi validate");
+
+    assert_eq!(output.status.code(), Some(2), "stdout: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown request `absent`"), "{stderr}");
+
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -22,15 +22,24 @@
 //!
 //! # What each metric supports
 //!
-//! | Metric | Stats |
-//! |---|---|
-//! | `http_req_duration` | `count`, `avg`, `min`, `max`, `p(N)` |
-//! | `http_req_failed` | `count`, `rate` |
-//! | `http_reqs`, `iterations`, `checks`, `checks_failed`, `script_errors` | `count` |
+//! | Metric | Stats | Measured by a run? |
+//! |---|---|---|
+//! | `http_req_duration` | `count`, `avg`, `min`, `max`, `p(N)` | yes |
+//! | `http_req_failed` | `count`, `rate` | yes |
+//! | `http_reqs`, `iterations` | `count` | yes |
+//! | `checks`, `checks_failed`, `script_errors` | `count` | **not yet** |
 //!
 //! Everything else is rejected at parse time. A threshold that cannot mean what it says
 //! is worse than no threshold: `rate` over a latency trend, or `p(95)` over a counter,
 //! would silently compare nonsense.
+//!
+//! The three counters in the last row are rejected for the same reason, one step
+//! further out: a load run does not evaluate scripts or assertions yet, so those counters
+//! always read `0`, and `checks_failed count==0` would pass while measuring nothing at
+//! all. The names stay in [`ThresholdMetric`] because the metric shapes exist in
+//! `lev-metrics` and the slice that runs scripts under load will fill them in — until
+//! then, saying "not measured yet" is the honest answer, and it is a much better one than
+//! a green threshold.
 
 use std::fmt;
 
@@ -102,6 +111,20 @@ impl ThresholdMetric {
         } else {
             "count"
         }
+    }
+
+    /// Whether a load run actually measures this metric today.
+    ///
+    /// `checks`, `checks_failed` and `script_errors` have counter shapes in `lev-metrics`,
+    /// but nothing records them during a load run: scripts and assertions run per request
+    /// today (`levi request`), not inside a run. A threshold over one of them would
+    /// compare `0` to the rule and could pass without measuring anything, so
+    /// [`Threshold::parse`] refuses them until the load engine fills them in.
+    pub fn is_measured(self) -> bool {
+        !matches!(
+            self,
+            ThresholdMetric::Checks | ThresholdMetric::ChecksFailed | ThresholdMetric::ScriptErrors
+        )
     }
 }
 
@@ -220,6 +243,16 @@ impl Threshold {
                 known_metrics()
             ))
         })?;
+
+        // A metric no run fills in would evaluate to `0`, so `checks_failed count==0`
+        // would pass on every run while measuring nothing. Refusing the expression is the
+        // only answer that cannot be mistaken for a verified rule.
+        if !metric.is_measured() {
+            return Err(invalid(format!(
+                "`{metric}` is not measured under load yet: a run does not evaluate scripts \
+                 or assertions, so it would always read 0 and pass without measuring anything"
+            )));
+        }
 
         let text = expression.trim();
         let split = text
@@ -443,8 +476,30 @@ mod tests {
         );
 
         // Not everything is a trend.
-        let error = Threshold::parse("checks_failed", "avg<1").unwrap_err();
+        let error = Threshold::parse("http_reqs", "avg<1").unwrap_err();
         assert!(error.to_string().contains("supports count"), "{error}");
+    }
+
+    #[test]
+    fn a_metric_no_run_measures_is_rejected_instead_of_always_reading_zero() {
+        // `checks_failed count==0` would pass on every run while measuring nothing: a load
+        // run evaluates neither scripts nor assertions yet. Refusing the expression is the
+        // only answer that cannot be mistaken for a verified rule.
+        for metric in ["checks", "checks_failed", "script_errors"] {
+            let error = Threshold::parse(metric, "count==0").unwrap_err();
+            assert!(
+                error.to_string().contains("not measured under load yet"),
+                "{error}"
+            );
+        }
+
+        // The names stay known, so the message can name the metric it refused.
+        assert_eq!(
+            ThresholdMetric::parse("checks_failed"),
+            Some(ThresholdMetric::ChecksFailed)
+        );
+        assert!(!ThresholdMetric::ChecksFailed.is_measured());
+        assert!(ThresholdMetric::HttpReqs.is_measured());
     }
 
     #[test]

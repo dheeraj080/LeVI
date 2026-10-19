@@ -353,3 +353,40 @@ fn a_bad_threshold_or_abort_rule_is_a_scenario_error() {
         Err(lev_format::FormatError::InvalidScenario(_))
     ));
 }
+
+#[test]
+fn a_body_takes_exactly_one_key() {
+    let format = Yaml;
+
+    // The one-key form *is* the shape: it parses.
+    let single = format
+        .request_from_str("id: r\nname: R\nmethod: POST\nurl: /x\nbody:\n  json: |\n    {}\n")
+        .unwrap();
+    assert!(matches!(single.body, lev_core::Body::Json(_)));
+
+    // Two keys is an error naming both, not a silent pick that drops what the author
+    // also wrote.
+    let two = format
+        .request_from_str(
+            "id: r\nname: R\nmethod: POST\nurl: /x\nbody:\n  json: \"{}\"\n  file: fixtures/payload.txt\n",
+        )
+        .unwrap_err();
+    let message = two.to_string();
+    assert!(message.contains("exactly one"), "{message}");
+    assert!(
+        message.contains("`json`") && message.contains("`file`"),
+        "{message}"
+    );
+
+    // An empty body is the same mistake in the other direction.
+    let empty = format
+        .request_from_str("id: r\nname: R\nmethod: POST\nurl: /x\nbody: {}\n")
+        .unwrap_err();
+    assert!(empty.to_string().contains("empty body"), "{empty}");
+
+    // And a misspelled key is named, rather than read as "nothing matched".
+    let typo = format
+        .request_from_str("id: r\nname: R\nmethod: POST\nurl: /x\nbody:\n  jsons: \"{}\"\n")
+        .unwrap_err();
+    assert!(typo.to_string().contains("jsons"), "{typo}");
+}

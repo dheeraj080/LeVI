@@ -112,8 +112,10 @@ pub struct BytesBodyDto {
 ///     {"sku": "{{$uuid}}"}
 /// ```
 ///
-/// An absent body is `None` on [`RequestDto`], not a variant here.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// A body takes **exactly one** of these keys, and deserialization enforces that: two keys
+/// (or none) is an error naming what it found, rather than a silent pick that drops the
+/// other. An absent body is `None` on [`RequestDto`], not a variant here.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum BodyDto {
     Json { json: String },
@@ -121,6 +123,62 @@ pub enum BodyDto {
     Raw { raw: RawBodyDto },
     File { file: String },
     Bytes { bytes: BytesBodyDto },
+}
+
+/// The on-disk body shape: every key optional, so deserialization can see *all* of them
+/// and count. `#[serde(untagged)]` on [`BodyDto`] would instead take the first variant that
+/// matched and silently drop the rest — exactly the mistake this exists to prevent.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BodyFields {
+    json: Option<String>,
+    form: Option<Vec<FormFieldDto>>,
+    raw: Option<RawBodyDto>,
+    file: Option<String>,
+    bytes: Option<BytesBodyDto>,
+}
+
+impl<'de> Deserialize<'de> for BodyDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let BodyFields {
+            json,
+            form,
+            raw,
+            file,
+            bytes,
+        } = BodyFields::deserialize(deserializer)?;
+
+        let refused = |present: [Option<&str>; 5]| {
+            let present: Vec<&str> = present.into_iter().flatten().collect();
+            let found = if present.is_empty() {
+                "found an empty body".to_string()
+            } else {
+                let names: Vec<String> = present.iter().map(|name| format!("`{name}`")).collect();
+                format!("found {}", names.join(" and "))
+            };
+            <D::Error as serde::de::Error>::custom(format!(
+                "a body takes exactly one of `json`, `form`, `raw`, `file`, `bytes`; {found}"
+            ))
+        };
+
+        match (json, form, raw, file, bytes) {
+            (Some(json), None, None, None, None) => Ok(BodyDto::Json { json }),
+            (None, Some(form), None, None, None) => Ok(BodyDto::Form { form }),
+            (None, None, Some(raw), None, None) => Ok(BodyDto::Raw { raw }),
+            (None, None, None, Some(file), None) => Ok(BodyDto::File { file }),
+            (None, None, None, None, Some(bytes)) => Ok(BodyDto::Bytes { bytes }),
+            (json, form, raw, file, bytes) => Err(refused([
+                json.as_ref().map(|_| "json"),
+                form.as_ref().map(|_| "form"),
+                raw.as_ref().map(|_| "raw"),
+                file.as_ref().map(|_| "file"),
+                bytes.as_ref().map(|_| "bytes"),
+            ])),
+        }
+    }
 }
 
 /// The two JavaScript hooks, authored as block scalars.

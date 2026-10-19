@@ -78,6 +78,13 @@ impl Session {
         let ready = self.recv().await;
         assert_eq!(ready["type"], json!("ready"), "{ready}");
     }
+
+    /// Write a raw line, for the messages a well-behaved client would never send.
+    async fn send_raw(&mut self, line: &str) {
+        self.stdin.write_all(line.as_bytes()).await.expect("write");
+        self.stdin.write_all(b"\n").await.expect("write newline");
+        self.stdin.flush().await.expect("flush");
+    }
 }
 
 #[tokio::test]
@@ -228,4 +235,63 @@ async fn an_unknown_command_is_a_configuration_error() {
         .expect("run levi");
 
     assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+#[tokio::test]
+async fn a_garbled_line_is_answered_and_the_session_continues() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("hi"))
+        .mount(&server)
+        .await;
+
+    let mut session = Session::start().await;
+    session.handshake().await;
+
+    // A line that is not a protocol message is a client mistake, but the framing is one
+    // message per line, so the engine can name it and carry on rather than just closing.
+    session.send_raw("this is not json").await;
+    let error = session.recv().await;
+    assert_eq!(error["type"], json!("error"), "{error}");
+    assert_eq!(error["code"], json!("badMessage"), "{error}");
+    // The client branches on `code`, so the human text is free to be explanatory.
+    assert!(
+        error["msg"].as_str().is_some_and(|msg| !msg.is_empty()),
+        "{error}"
+    );
+
+    // Still alive: a real request goes through on the same session.
+    session
+        .send(json!({
+            "type": "sendRequest",
+            "request": {
+                "id": "r1",
+                "name": "hello",
+                "method": "GET",
+                "url": format!("{}/hello", server.uri())
+            },
+            "env": { "seed": 0 }
+        }))
+        .await;
+    let result = session.recv().await;
+    assert_eq!(result["type"], json!("requestResult"), "{result}");
+    assert_eq!(result["response"]["status"], json!(200));
+
+    session
+        .send(json!({ "type": "stop", "graceful": true }))
+        .await;
+    let _ = session.recv().await;
+}
+
+#[tokio::test]
+async fn a_garbled_first_line_is_named_before_the_session_closes() {
+    // Before the handshake there is no session to keep alive, but the client still deserves
+    // to be told *why* the stream closed rather than seeing a silent EOF.
+    let mut session = Session::start().await;
+    session.send_raw("{not json").await;
+
+    let error = session.recv().await;
+    assert_eq!(error["type"], json!("error"), "{error}");
+    assert_eq!(error["code"], json!("badMessage"), "{error}");
 }

@@ -10,7 +10,7 @@ plain text, one request per file. This directory holds the specification and the
 collection.yaml               # id, name, vars, auth defaults, baseUrl
 environments/<env>.yaml       # an overlay of vars
 requests/<name>.yaml          # one request per file
-load/<name>.yaml              # a load scenario: executor + steps + thresholds
+load/<name>.yaml              # a load scenario (a convention; passed to `levi run`)
 ```
 
 ## Syntax
@@ -73,9 +73,10 @@ body:
   file: fixtures/logo.png
 ```
 
-A `file` path must stay inside the collection — no absolute paths and no `..` — because
-a request file is text in a repository, often from a pull request, and opening it must
-not be enough to read `../../.ssh/id_rsa`. The content type comes from the extension;
+A `file` path must resolve **inside the collection** — no absolute paths, and nothing that
+walks out of the directory (`..` that climbs above the root, including through a symlink)
+— because a request file is text in a repository, often from a pull request, and opening it
+must not be enough to read `../../.ssh/id_rsa`. The content type comes from the extension;
 an explicit `Content-Type` header always wins. Files are read once, when the collection
 is loaded, so a missing fixture fails `levi validate` and `levi request` rather than
 surfacing mid-run.
@@ -89,8 +90,10 @@ body:
 
 ## Templates
 
-- `{{ name }}` resolves a variable (precedence: global < collection < environment <
-  runtime < iteration).
+- `{{ name }}` resolves a variable. Two layers are read from disk — the collection's
+  `vars`, then the environment overlay (`environments/<env>.yaml`), which wins — and a
+  script adds one more at run time with `lev.env.set`. A process-wide layer and a
+  per-iteration layer are not implemented.
 - `{{$uuid}}`, `{{$timestamp}}`, `{{$randomInt}}` are dynamic functions.
 
 ## Secrets
@@ -129,7 +132,8 @@ request and never hangs or crashes the engine. The whole `lev.*` surface is:
 | `lev.request` | the resolved request (mutable in a pre-request script) |
 | `lev.response` | the response, with `.json` when the body is JSON (post only) |
 | `lev.env.get(name)` / `.set(name, value)` / `.has(name)` / `.all()` | the resolved variable scope |
-| `lev.test(name, fnOrBool)` / `lev.expect(value).toBe(...)` | record a check |
+| `lev.test(name, fnOrBool)` | record a check; a thrown error fails it |
+| `lev.expect(value)` | chai-style matchers that throw on failure: `.toBe`, `.toEqual`, `.toContain`, `.toMatch`, `.toHaveLength`, `.toBeTruthy` / `.toBeFalsy`, and the numeric `.toBeLessThan` / `.toBeLessThanOrEqual` / `.toBeGreaterThan` / `.toBeGreaterThanOrEqual` |
 | `lev.random.int(min, max)` / `.float()` / `.uuid()` / `.string(len)` / `.pick(arr)` | seeded randomness (`--seed` reproduces a run) |
 | `lev.log(message)` | a redacted log line |
 
@@ -197,7 +201,12 @@ abortOn:                  # optional: stop the run as soon as one of these fails
   |---|---|---|
   | `http_req_duration` | `count`, `avg`, `min`, `max`, `p(N)` | milliseconds |
   | `http_req_failed` | `count`, `rate` | `rate` is a `0..1` fraction |
-  | `http_reqs`, `iterations`, `checks`, `checks_failed`, `script_errors` | `count` | a count |
+  | `http_reqs`, `iterations` | `count` | a count |
+
+  `checks`, `checks_failed` and `script_errors` are reserved names: a load run does not
+  evaluate scripts or assertions yet, so nothing records them, and a threshold over one of
+  them is a parse error rather than a rule that would always pass against `0`. They join
+  the table when scripts run under load.
 
   The comparison is one of `>`, `>=`, `<`, `<=`, `==`, `!=`. A stat a metric cannot
   answer — `p(95)` of a counter, `rate` of a latency — is a parse error, not a silently

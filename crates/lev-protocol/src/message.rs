@@ -10,10 +10,15 @@ use serde::{Deserialize, Serialize};
 use crate::dto::{CheckDto, EchoDto, EnvDto, RequestDto, ResponseDto};
 use crate::version::Version;
 
-/// A capability the engine advertises during the handshake.
+/// A protocol capability a peer may declare.
 ///
-/// The client must not rely on a capability the engine did not advertise; that is
-/// what lets an older engine serve a newer UI.
+/// A client states what it can speak in [`Message::Hello`]; the engine advertises what it
+/// offers in [`Message::Ready`]. The rule — a client must not rely on a capability the
+/// engine did not advertise — is what lets an older engine serve a newer UI.
+///
+/// No engine advertises anything yet: this build implements exactly one mode, so there is
+/// nothing to choose between, and `Ready` carries no capability list. The variants exist so
+/// the vocabulary is frozen before the first optional capability ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Capability {
@@ -59,14 +64,19 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// The code exactly as it appears on the wire.
+    ///
+    /// This is serde's `camelCase` spelling, and [`Display`](std::fmt::Display) renders it,
+    /// so a human reading a remote error sees the same token a client branches on. The two
+    /// cannot drift: a test below pins `to_string()` to serde's output.
     pub fn as_str(self) -> &'static str {
         match self {
-            ErrorCode::ProtocolVersionMismatch => "ProtocolVersionMismatch",
-            ErrorCode::BadMessage => "BadMessage",
-            ErrorCode::Config => "Config",
-            ErrorCode::Engine => "Engine",
-            ErrorCode::Unsupported => "Unsupported",
-            ErrorCode::Internal => "Internal",
+            ErrorCode::ProtocolVersionMismatch => "protocolVersionMismatch",
+            ErrorCode::BadMessage => "badMessage",
+            ErrorCode::Config => "config",
+            ErrorCode::Engine => "engine",
+            ErrorCode::Unsupported => "unsupported",
+            ErrorCode::Internal => "internal",
         }
     }
 }
@@ -92,6 +102,8 @@ pub enum Message {
     /// The mandatory first message. The engine replies `Ready` or `Error`.
     Hello {
         protocol_version: Version,
+        /// What this client can speak. The engine ignores it today: there is only one mode,
+        /// so there is nothing to select. See [`Capability`].
         #[serde(default)]
         capabilities: Vec<Capability>,
     },
@@ -201,10 +213,19 @@ mod tests {
     }
 
     #[test]
-    fn error_codes_have_stable_names() {
-        assert_eq!(
-            ErrorCode::ProtocolVersionMismatch.as_str(),
-            "ProtocolVersionMismatch"
-        );
+    fn an_error_code_renders_exactly_as_it_travels() {
+        // A client branches on the serialized code, so the human spelling must be the same
+        // token — otherwise a user reads one name while the docs tell them to match another.
+        for code in [
+            ErrorCode::ProtocolVersionMismatch,
+            ErrorCode::BadMessage,
+            ErrorCode::Config,
+            ErrorCode::Engine,
+            ErrorCode::Unsupported,
+            ErrorCode::Internal,
+        ] {
+            let wire = serde_json::to_string(&code).unwrap();
+            assert_eq!(wire, format!("\"{code}\""), "{code:?}");
+        }
     }
 }

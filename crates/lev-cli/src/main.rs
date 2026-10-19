@@ -296,7 +296,7 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
         Collection::empty()
     };
 
-    // `global < collection < environment`; the engine still owns resolution.
+    // `collection < environment`; the engine still owns resolution.
     let mut vars = collection.vars.clone();
     if let Some(name) = options.env.as_deref() {
         let env_path = base_dir.join("environments").join(format!("{name}.yaml"));
@@ -387,7 +387,7 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
         }
     }
 
-    // `global < collection < environment`; the engine still owns resolution.
+    // `collection < environment`; the engine still owns resolution.
     let mut vars = collection.vars.clone();
     if let Some(name) = options.env.as_deref() {
         let env_path = base_dir.join("environments").join(format!("{name}.yaml"));
@@ -672,6 +672,12 @@ fn run_validate(args: &[String]) -> Result<(), Fail> {
     for path in yaml_files(&dir.join("requests"))? {
         check(&path, load_and_resolve(&format, &path, &dir).map(|_| ()));
     }
+    // A load scenario is a collection document too: its syntax, thresholds and abort rules
+    // are all readable from the file alone, so it is parsed here with the rest.
+    let scenario_paths = yaml_files(&dir.join("load"))?;
+    for path in &scenario_paths {
+        check(path, load_scenario(&format, path).map(|_| ()));
+    }
 
     if checked == 0 {
         return Err(Fail::config(format!(
@@ -679,6 +685,28 @@ fn run_validate(args: &[String]) -> Result<(), Fail> {
             dir.display()
         )));
     }
+
+    // Cross-file checks, run only once every file parses on its own: a scenario's steps
+    // must name requests that exist, and its thresholds must be ones a run can answer. It
+    // is far friendlier to hear that from `validate` than from a run already under way.
+    if failed == 0 && !scenario_paths.is_empty() {
+        let collection = if collection_path.is_file() {
+            load_collection(&format, &collection_path)?
+        } else {
+            Collection::empty()
+        };
+        let requests = load_requests(&format, &dir)?;
+        for path in &scenario_paths {
+            let Ok(scenario) = load_scenario(&format, path) else {
+                continue;
+            };
+            if let Err(error) = CompiledScenario::compile(&scenario, &collection, &requests) {
+                failed += 1;
+                eprintln!("{}: {error}", path.display());
+            }
+        }
+    }
+
     if failed > 0 {
         return Err(Fail::config(format!(
             "{failed} of {checked} documents failed to parse"

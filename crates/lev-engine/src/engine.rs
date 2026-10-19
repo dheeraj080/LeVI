@@ -15,7 +15,7 @@ use lev_core::{
 use lev_http::{ClientConfig, HttpClient};
 use lev_protocol::{
     negotiate, EchoDto, EnvDto, ErrorCode, LogLevel, Message, RequestDto, ResponseDto, Transport,
-    PROTOCOL_VERSION,
+    TransportError, PROTOCOL_VERSION,
 };
 use lev_script::{
     Limits, Phase, Sandbox, ScriptInput, ScriptOutcome, ScriptRequest, ScriptResponse,
@@ -173,10 +173,24 @@ impl Engine {
         let first = tokio::select! {
             biased;
             () = &mut shutdown => return Ok(()),
-            next = transport.recv() => next?,
+            next = transport.recv() => next,
         };
-        let Some(first) = first else {
-            return Ok(());
+        let first = match first {
+            Ok(Some(message)) => message,
+            Ok(None) => return Ok(()),
+            // A line that is not a protocol message is still a *client* mistake worth an
+            // answer: `badMessage`, then close — there is no session yet to keep alive. The
+            // framing is one message per line, so nothing after it is lost either way.
+            Err(TransportError::Decode(error)) => {
+                transport
+                    .send(Message::error(
+                        ErrorCode::BadMessage,
+                        format!("not a protocol message: {error}"),
+                    ))
+                    .await?;
+                return Ok(());
+            }
+            Err(other) => return Err(other.into()),
         };
 
         let Message::Hello {
@@ -217,17 +231,32 @@ impl Engine {
         tracing::info!(version = %version, engine = ENGINE_VERSION, "session ready");
 
         loop {
-            let message = tokio::select! {
+            let incoming = tokio::select! {
                 biased;
                 () = &mut shutdown => {
                     self.note_shutdown(&mut transport, "signal").await;
                     return Ok(());
                 }
-                next = transport.recv() => next?,
+                next = transport.recv() => next,
             };
-            let Some(message) = message else {
-                tracing::info!(reason = "stream closed", "engine session ending");
-                return Ok(());
+            let message = match incoming {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    tracing::info!(reason = "stream closed", "engine session ending");
+                    return Ok(());
+                }
+                // Framing is one message per line, so a garbled line costs the line and not
+                // the session: answer `badMessage` and keep serving.
+                Err(TransportError::Decode(error)) => {
+                    transport
+                        .send(Message::error(
+                            ErrorCode::BadMessage,
+                            format!("not a protocol message: {error}"),
+                        ))
+                        .await?;
+                    continue;
+                }
+                Err(other) => return Err(other.into()),
             };
             match message {
                 Message::SendRequest { request, env } => {

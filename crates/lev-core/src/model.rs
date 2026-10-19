@@ -15,8 +15,9 @@ use crate::template::Template;
 /// Stable identifier (slug) for a collection or request.
 pub type Id = String;
 
-/// Variable layers. Precedence is applied by the caller: global < collection <
-/// environment < runtime < iteration.
+/// Variable layers. The caller applies precedence by merging: the collection's `vars`
+/// first, then the environment overlay that wins over them, then anything a script adds
+/// at run time with `lev.env.set`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VarSet {
     pub entries: BTreeMap<String, VarValue>,
