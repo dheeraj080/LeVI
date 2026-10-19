@@ -260,6 +260,18 @@ pub struct ResponseDto {
     /// Length of the (redacted) body in bytes.
     pub body_len: usize,
     pub timings: TimingsDto,
+    /// How many attempts this response took.
+    ///
+    /// A client that retried a transient failure reports more than one, so a response
+    /// that looks slow can be read as what it actually was: several requests, of
+    /// which only this one answered. Absent on the wire means 1.
+    #[serde(default = "one_attempt")]
+    pub attempts: u32,
+}
+
+/// The value of [`ResponseDto::attempts`] for a client that never retried anything.
+fn one_attempt() -> u32 {
+    1
 }
 
 #[cfg(test)]
@@ -415,6 +427,7 @@ mod tests {
                 body: String::new(),
                 body_len: 0,
                 timings: TimingsDto::default(),
+                attempts: 1,
             },
             checks: vec![CheckDto {
                 name: "status is 200".to_string(),
@@ -427,6 +440,15 @@ mod tests {
         assert!(json.contains("\"checks\""), "{json}");
         assert!(json.contains("\"logs\""), "{json}");
         assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), result);
+    }
+
+    #[test]
+    fn a_response_without_attempts_is_one() {
+        // What an engine that predates v0.3 sends. The field is new, and its absence
+        // is the whole of the old contract: one attempt, nothing retried.
+        let json = "{\"status\":200,\"version\":\"HTTP/1.1\",\"headers\":[],\"body\":\"\",\"bodyLen\":0,\"timings\":{\"totalMs\":1.0,\"ttfbMs\":1.0,\"receiveMs\":0.0}}";
+        let response: ResponseDto = serde_json::from_str(json).unwrap();
+        assert_eq!(response.attempts, 1);
     }
 
     #[test]

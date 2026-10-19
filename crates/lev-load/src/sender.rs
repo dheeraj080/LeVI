@@ -42,7 +42,17 @@ impl HttpSender {
 
     /// A sender with an explicit transport config — how a run applies its own
     /// default request deadline (`timeout:` / `--timeout`).
+    ///
+    /// Retries are pinned off here, whatever the config says. A load report is a
+    /// statement about what the target saw: a retry loop would fold three requests
+    /// into one sample and one latency, and the failure behind the first two would
+    /// vanish from the run entirely.
     pub fn with_config(config: ClientConfig) -> Result<Self, LoadError> {
+        let config = ClientConfig {
+            retries: 0,
+            retry_non_idempotent: false,
+            ..config
+        };
         Ok(Self {
             client: HttpClient::with_config(config)?,
         })

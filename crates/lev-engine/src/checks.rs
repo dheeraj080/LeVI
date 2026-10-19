@@ -134,6 +134,7 @@ mod tests {
                 ("X-Trace".to_string(), "abc123".to_string()),
             ],
             body: Bytes::from(body.to_string()),
+            attempts: 1,
             timings: Timings {
                 total: Duration::from_millis(12),
                 ..Timings::default()

@@ -79,6 +79,13 @@ REQUEST OPTIONS:
     --seed <n>           Seed for dynamic functions (uuid, timestamp, randomInt)
     --timeout <dur>      Deadline per request, e.g. 30s or 500ms. Wins over the
                          request's own `timeout:` [default: 30s]
+    --retries <n>        Retry a transient failure n more times: 429/502/503/504,
+                         a refused connection, a reset, a deadline. The wait
+                         doubles each attempt, and `Retry-After` is honoured.
+                         Idempotent methods only [default: 0]
+    --retry-non-idempotent
+                         Also retry POST/PATCH. A retried POST can send twice,
+                         so it is never what `--retries` alone implies.
     --show-body          Print the (redacted) response body
     --max-body <bytes>   Truncate the printed body [default: 4096]
 
@@ -111,8 +118,12 @@ Ctrl-C stops it gracefully with a partial report. Scripts and assertions are not
 evaluated under load.
 
 Requests are bounded: a send is cut off at its `timeout:` (or the run/flag default), so
-a target that stops answering costs one iteration instead of hanging the tool.
-`levi serve --stdio` stops gracefully on Ctrl-C or SIGTERM — the request in flight is
+a target that stops answering costs one iteration instead of hanging the tool. Retries go
+the other way — spending a second request on a target that refused the first — so they are
+off unless asked for, they never cover a method that is not safe to send twice unless
+`--retry-non-idempotent` says so out loud, and `levi run` has none at all: a load report
+counts every request the target saw, and a retry loop would fold three of them into one
+sample. `levi serve --stdio` stops gracefully on Ctrl-C or SIGTERM — the request in flight is
 answered, then the engine reports why it stopped and exits 0.
 ",
         version = env!("CARGO_PKG_VERSION"),
@@ -259,7 +270,17 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
     let env_dto = convert::env_to_dto(&collection, &vars, options.seed);
 
     // The interactive path: a real `SendRequest` over the typed in-process channel.
-    let engine = Engine::from_store(store_from_env())?;
+    //
+    // Retries are a transport policy, owned by whoever is running the command, so
+    // they are set here and not in the collection: a load run must never pick one up
+    // from a file that was written to paper over a flaky CI network.
+    if options.retry_non_idempotent && options.retries == 0 {
+        return Err(Fail::config(
+            "--retry-non-idempotent does nothing without --retries",
+        ));
+    }
+    let engine = Engine::from_store(store_from_env())?
+        .with_retries(options.retries, options.retry_non_idempotent)?;
     let (mut client, handle) = in_process_client(engine, 8).await?;
 
     let outcome = client.send_request(request_dto, env_dto).await?;
@@ -653,7 +674,14 @@ fn print_echo(echo: &EchoDto) {
 }
 
 fn print_response(response: &ResponseDto, show_body: bool, max_body: usize) {
-    println!("HTTP {} ({})", response.status, response.version);
+    // Saying how many attempts it took is the difference between "the target was
+    // slow for 3s" and "the target refused twice, then answered".
+    let attempts = if response.attempts > 1 {
+        format!(", {} attempts", response.attempts)
+    } else {
+        String::new()
+    };
+    println!("HTTP {} ({}{attempts})", response.status, response.version);
     print_timings(&response.timings);
 
     println!("response headers:");
@@ -747,6 +775,8 @@ struct RequestOptions {
     show_body: bool,
     max_body: usize,
     timeout: Option<Duration>,
+    retries: u32,
+    retry_non_idempotent: bool,
 }
 
 impl RequestOptions {
@@ -758,6 +788,8 @@ impl RequestOptions {
         let mut show_body = false;
         let mut max_body = 4096usize;
         let mut timeout = None;
+        let mut retries = 0u32;
+        let mut retry_non_idempotent = false;
 
         let mut index = 0;
         while index < args.len() {
@@ -782,6 +814,14 @@ impl RequestOptions {
                     index += 1;
                     timeout = Some(parse_timeout_flag(next_value(args, index, "--timeout")?)?);
                 }
+                "--retries" => {
+                    index += 1;
+                    let value = next_value(args, index, "--retries")?;
+                    retries = value.parse().map_err(|_| {
+                        Fail::config(format!("--retries must be a whole number, got `{value}`"))
+                    })?;
+                }
+                "--retry-non-idempotent" => retry_non_idempotent = true,
                 "--max-body" => {
                     index += 1;
                     let value = next_value(args, index, "--max-body")?;
@@ -816,6 +856,8 @@ impl RequestOptions {
             show_body,
             max_body,
             timeout,
+            retries,
+            retry_non_idempotent,
         })
     }
 }

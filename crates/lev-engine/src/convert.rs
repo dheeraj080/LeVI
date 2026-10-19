@@ -213,6 +213,7 @@ pub fn response_to_dto(response: &Response, redactor: &Redactor) -> ResponseDto 
         body_len: body.len(),
         body,
         timings: timings_to_dto(&response.timings),
+        attempts: response.attempts,
     }
 }
 

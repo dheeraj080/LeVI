@@ -77,6 +77,13 @@ script `log:` lines, and the checks - redaction happens in the engine, before an
 crosses the boundary. The command exits **1** when a check failed, which is what a CI job
 gates on.
 
+Requests are bounded: `--timeout` (or a request's own `timeout:`) cuts a send off at a
+deadline, so a target that stops answering costs one iteration instead of hanging the
+tool, and `--retries` spends a second request on a target that refused the first - off
+unless asked for, on idempotent methods only, and never on `levi run`, whose report has to
+count every request the target saw. The reasoning is in
+[`docs/adr/0005-reliability-floor.md`](docs/adr/0005-reliability-floor.md).
+
 `levi run` compiles a scenario against the collection, then drives it with the load
 engine: worker threads, each running a pool of virtual users, feeding per-worker HDR
 histograms that the aggregator merges four times a second. It prints requests, failures,

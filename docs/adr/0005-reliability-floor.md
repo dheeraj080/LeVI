@@ -1,0 +1,139 @@
+# ADR 0005 - Reliability floor: deadlines, file bodies, graceful stop, retries
+
+- **Status:** accepted
+- **Date:** 2026-10-19
+- **Phase:** 1 (reliability floor, first release train)
+
+## Context
+
+The plan's Phase 1 is the *reliability floor*: the set of behaviours that make Levi
+trustworthy enough to run against somebody else's server and to trust its own numbers.
+It is not a feature phase. Each item below is something the code already claimed, in a
+doc or in its own type names, without doing it.
+
+Four gaps were named and closed:
+
+1. nothing bounded a request. A target that accepted a connection and then went quiet
+   hung `levi request` forever, and hung a load run's virtual users with it;
+2. a `file:` body was parsed, validated and then never read - the request went out with
+   no body at all;
+3. `levi serve` could only stop by being killed, which tears a session down mid-dispatch;
+4. a transient `503` from a load balancer was a hard failure with no second chance, so a
+   flaky hop looked like a broken service.
+
+The rule for this phase was that a gap is closed by *implementing the behaviour*, never
+by softening the claim. Where that was not possible, the claim was amended in the same
+change - and the amendment is recorded here.
+
+## Decisions
+
+### 1. Deadlines are resolved once, at load, and travel with the request
+
+A request has one deadline, decided before anything is sent:
+
+```text
+--timeout flag  >  request `timeout:`  >  scenario `timeout:`  >  transport default (30s)
+```
+
+The transport has three separate clocks, because they fail for different reasons: a
+**connect** timeout (10s) bounds TCP/TLS establishment so a black-holed route fails fast
+and says *connect* rather than *timeout*; a **request** timeout bounds the whole exchange
+(dispatch through the last body byte); and a **pool idle** timeout (90s) closes
+connections a target or a middlebox has already forgotten. The deadline covers the body
+too - a target that dribbles bytes forever is the same failure as one that never answers.
+
+The flag is applied by the CLI at load time, so every layer downstream sees one resolved
+deadline instead of re-deriving one from a partially-populated config.
+
+**Consequence:** `levi request --timeout 0` is rejected at parse (exit `2`), because
+"unbounded" is the thing this phase exists to remove. A zero in a collection file is
+*not* rejected yet - that validation belongs with the rest of the format checks, and is
+noted as deferred below.
+
+**Wire:** `sendRequest.request.timeoutMs` is optional and additive; a deadline that
+expires is reported as `error { code: "engine" }`, since the target failed to answer and
+no new error code says that better. `PROTOCOL_VERSION` went `0.2 -> 0.3` for this and the
+body kind below; the field is absent on a v0.2 client, and such an engine applies its own
+bounded default.
+
+### 2. A `file:` body is read at load time, by the side that owns the collection
+
+The file is opened, canonicalised and confined **when the collection is loaded** - not
+per iteration, and not by the engine. Two reasons:
+
+- the client is the side that knows the collection root and the side a user is watching,
+  so a fixture path is resolved where it can be explained;
+- a load run renders its body once and reuses the bytes, so opening a file per iteration
+  would put a filesystem call in the hot loop for no gain.
+
+The path is confined to the collection root: `..`, absolute paths and symlinks that
+escape are refused, `{{` in a path is refused (a path is not a template), and the file is
+capped at 32 MiB. Content type comes from the extension, and an explicit `Content-Type`
+header still wins. The bytes travel as `Body::Bytes` / `BodyDto::Bytes { contentType?,
+base64 }`, so an engine needs no filesystem access at all and can run where no collection
+is checked out. A `file` body that still reaches an engine is refused: the engine cannot
+tell a fixture from `/etc/passwd`.
+
+`levi validate` resolves file bodies, so a missing or escaping fixture is a load error
+(exit `2`) rather than a surprise during a run.
+
+### 3. `levi serve` stops *between* messages
+
+`Engine::serve_with_shutdown` checks the stop signal between dispatches, never during
+one. An in-flight request is always answered, and the session then emits a final `log`
+saying why it ended, so the client learns more than "the pipe closed". This is the
+cheapest possible definition of graceful, and it is the one that matches the loop's
+shape: the engine dispatches one message at a time, so there is no partial dispatch to
+cancel.
+
+`stop.graceful` is recorded in that final log even though `graceful: false` currently has
+nothing extra to cut short - the distinction stays visible on the wire instead of being
+quietly dropped.
+
+### 4. Retrying a transient failure is a *client* policy, and never a load-run policy
+
+Retries live in the transport (`ClientConfig`), where the deadline lives, and not in a
+collection:
+
+- a request file describes *what* to send; how hard to try again is a statement about
+  the client's own time and about the load it is willing to put on the target;
+- `levi run` therefore has **no retries at all** - not "off by default", but unpinned
+  from the config it builds. A load report says "the target saw N requests", and a retry
+  loop would fold two refusals and one success into a single sample with a single
+  latency, hiding exactly the failures the run exists to measure.
+
+Retries are off unless asked for, on a `Retry-After`-aware exponential backoff (200ms
+doubling to 5s, `Retry-After` honoured up to 30s). Only transient failures count: `429`,
+`502`, `503`, `504`, a refused connection, a reset, a deadline. `500` is deliberately
+excluded - the target *processed* that request and failed, and repeating it may fail the
+same way or, worse, succeed twice.
+
+Only **idempotent** methods are retried by default (`GET`, `HEAD`, `OPTIONS`, `PUT`,
+`DELETE`). Lifting that for `POST`/`PATCH` is possible via an explicit, named flag,
+because a retried `POST` can create two orders: the danger is named at the call site
+rather than assumed away.
+
+Every response carries `attempts`, and the CLI prints it when it is more than one. A
+retried success is 3 requests that the target saw, and a report that presents it as one
+slow request is the kind of quiet lie this phase is about removing. Timings describe the
+attempt that answered; the waits in between are not the server's latency.
+
+**Consequence:** a retry is a second request to somebody else's service. This is why the
+policy is set by whoever runs the command, is forced off in the load spine, and is
+counted where a user can see it.
+
+## Deferred, on the record
+
+- **Instrumented connector timings** (`dnsMs`, `connectMs`, `tlsMs`): the fields exist on
+  the wire and stay omitted until a connector that can measure the phases lands.
+  `totalMs`, `ttfbMs` and `receiveMs` are real today.
+- **OS keychain secrets**: secrets come from `LEVI_SECRET_*` environment variables only.
+- **`serve`-wide defaults** (`levi serve` has no `--timeout`/`--retries` of its own): a
+  serve-wide default belongs in `levi.toml` with the rest of the project config, not in
+  a second flag with different precedence rules.
+- **Zero deadlines in a collection file** are not rejected; only the flag is.
+- **Structured logging** to stderr (stdout is the NDJSON serve channel, so this is where
+  it must go) is not implemented; the engine still logs through the protocol `log`
+  message.
+- **Coordinated-omission correction**, **open/ramping executors**, **scripts and
+  assertions under load** - Phase 3 work, see ADR 0004.

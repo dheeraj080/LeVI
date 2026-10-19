@@ -210,3 +210,107 @@ async fn a_zero_timeout_is_rejected_before_anything_is_sent() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("greater than 0"), "stderr:\n{stderr}");
 }
+
+/// A target that refuses twice before answering, so a retry has something to do.
+async fn mount_flaky_get(server: &MockServer, path_value: &str, refusals: u64) {
+    Mock::given(method("GET"))
+        .and(path(path_value.to_string()))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(refusals)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(path_value.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_flaky_target_is_retried_and_the_result_says_how_often() {
+    let server = MockServer::start().await;
+    mount_flaky_get(&server, "/flaky", 2).await;
+
+    let dir = scratch_dir("retry");
+    write_collection(&dir, &server.uri());
+    write_request(
+        &dir,
+        "flaky.yaml",
+        "id: flaky\nname: Flaky\nmethod: GET\nurl: /flaky\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_levi"))
+        .args(["request", "requests/flaky.yaml", "--retries", "2"])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("run levi request");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "stdout:\n{stdout}");
+    assert!(stdout.contains("HTTP 200"), "{stdout}");
+    // The second attempt is worth saying out loud: otherwise the report of a slow
+    // response hides two refusals behind it.
+    assert!(stdout.contains("3 attempts"), "{stdout}");
+    let seen = server.received_requests().await.expect("requests");
+    assert_eq!(seen.len(), 3, "the target was asked exactly three times");
+}
+
+#[tokio::test]
+async fn a_post_is_sent_once_unless_the_flag_says_otherwise() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/orders"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let dir = scratch_dir("retry-post");
+    write_collection(&dir, &server.uri());
+    write_request(
+        &dir,
+        "orders.yaml",
+        "id: orders\nname: An order\nmethod: POST\nurl: /orders\nbody:\n  json: '{\"sku\":\"A1\"}'\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_levi"))
+        .args(["request", "requests/orders.yaml", "--retries", "2"])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("run levi request");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("HTTP 503"), "{stdout}");
+    assert!(!stdout.contains("attempts"), "{stdout}");
+    let seen = server.received_requests().await.expect("requests");
+    assert_eq!(
+        seen.len(),
+        1,
+        "a retried POST can create two orders, so `--retries` alone does not"
+    );
+}
+
+#[tokio::test]
+async fn asking_to_retry_a_post_without_asking_for_retries_is_a_config_error() {
+    let dir = scratch_dir("retry-nonidempotent");
+    write_collection(&dir, "http://127.0.0.1:1");
+    write_request(
+        &dir,
+        "orders.yaml",
+        "id: orders\nname: An order\nmethod: POST\nurl: /orders\nbody:\n  json: '{\"sku\":\"A1\"}'\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_levi"))
+        .args(["request", "requests/orders.yaml", "--retry-non-idempotent"])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("run levi request");
+
+    // Nothing is sent: a flag that would do nothing is a mistake to report, not to
+    // accept quietly.
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--retries"), "stderr:\n{stderr}");
+}

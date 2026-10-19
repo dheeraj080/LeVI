@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use lev_core::{MapSecretStore, Redactor};
 use lev_engine::{in_process_client, Client, Engine, EngineError};
+use lev_http::ClientConfig;
 use lev_protocol::{
     in_process_channel, BodyDto, Capability, EnvDto, ErrorCode, LogLevel, Message, NdjsonTransport,
     RequestDto, Transport, VarValueDto, Version,
@@ -88,6 +89,56 @@ async fn a_request_travels_through_the_protocol_and_comes_back() {
     assert_eq!(response.body, "{\"ok\":true}");
     assert_eq!(echo.method, "GET");
     assert!(!response.timings.total_ms.is_nan());
+
+    client.stop(true).await.expect("stop");
+    drop(client);
+    handle.await.expect("join").expect("serve");
+}
+
+#[tokio::test]
+async fn a_retried_request_reports_how_many_attempts_it_took() {
+    let server = MockServer::start().await;
+    // Two refusals, then an answer. A client that gave up at the first 503 would
+    // report 503; one that retried without saying so would look like a single slow
+    // request. Both mistakes are visible here: the status *and* the count, and the
+    // count must match what the target actually saw.
+    Mock::given(method("GET"))
+        .and(path("/flaky"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/flaky"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&server)
+        .await;
+
+    let engine = engine_with_secret("token", "s3cr3t-token")
+        .with_client_config(
+            ClientConfig::default()
+                .with_retries(2)
+                .with_retry_backoff(Duration::from_millis(5)),
+        )
+        .expect("engine");
+
+    let (mut client, handle) = in_process_client(engine, 8).await.expect("connect");
+    let outcome = client
+        .send_request(
+            get_request(format!("{}/flaky", server.uri())),
+            bearer_env("token", None),
+        )
+        .await
+        .expect("request");
+
+    assert_eq!(outcome.response.status, 200);
+    assert_eq!(outcome.response.attempts, 3);
+    let seen = server.received_requests().await.expect("requests");
+    assert_eq!(
+        seen.len(),
+        3,
+        "the target was asked exactly as often as the result claims"
+    );
 
     client.stop(true).await.expect("stop");
     drop(client);

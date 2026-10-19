@@ -8,6 +8,8 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -226,4 +228,306 @@ async fn a_requests_own_deadline_beats_the_client_default() {
 
     let response = client.send(prepared).await.unwrap();
     assert_eq!(response.status, 200);
+}
+
+// ---- retries ----
+
+/// A server that answers a fixed list of statuses, then 200 forever.
+///
+/// The list is the test's script: "the target refused twice, then answered" is one
+/// argument, not a timing. The returned counter is how many requests actually
+/// arrived — the number a load report would have to be honest about.
+async fn start_flaky_server(statuses: Vec<u16>) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let script = Arc::new(std::sync::Mutex::new(statuses));
+
+    let served = count.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(_) => break,
+            };
+            let served = served.clone();
+            let script = script.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |_request: Request<Incoming>| {
+                    let served = served.clone();
+                    let script = script.clone();
+                    async move {
+                        let index = served.fetch_add(1, Ordering::SeqCst);
+                        let status = {
+                            let script = script.lock().expect("script");
+                            if index < script.len() {
+                                script[index]
+                            } else {
+                                200
+                            }
+                        };
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(status)
+                                .body(Full::new(Bytes::from("ok")))
+                                .unwrap(),
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    (address, count)
+}
+
+/// A client tuned so a retry test does not sit out a real backoff.
+fn retrying(retries: u32) -> ClientConfig {
+    ClientConfig::default()
+        .with_retries(retries)
+        .with_retry_backoff(Duration::from_millis(5))
+}
+
+fn get(url: String) -> PreparedRequest {
+    request(Method::Get, url, vec![])
+}
+
+#[tokio::test]
+async fn a_flaky_target_is_retried_until_it_answers() {
+    let (address, count) = start_flaky_server(vec![503, 503]).await;
+    let client = HttpClient::with_config(retrying(3)).unwrap();
+
+    let response = client
+        .send(get(format!("http://{address}/flaky")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.attempts, 3);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        3,
+        "the target saw exactly what the response says it saw"
+    );
+}
+
+#[tokio::test]
+async fn retries_are_off_until_somebody_asks_for_them() {
+    let (address, count) = start_flaky_server(vec![503]).await;
+    let client = HttpClient::new().unwrap();
+
+    let response = client
+        .send(get(format!("http://{address}/flaky")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 503);
+    assert_eq!(response.attempts, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_five_hundred_is_reported_not_retried() {
+    // 500 says the target processed the request and failed. Repeating it may fail
+    // the same way — or succeed twice, which is worse.
+    let (address, count) = start_flaky_server(vec![500]).await;
+    let client = HttpClient::with_config(retrying(3)).unwrap();
+
+    let response = client
+        .send(get(format!("http://{address}/boom")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 500);
+    assert_eq!(response.attempts, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_post_is_not_retried_by_default() {
+    let (address, count) = start_flaky_server(vec![503]).await;
+    let client = HttpClient::with_config(retrying(3)).unwrap();
+
+    let response = client
+        .send(request(
+            Method::Post,
+            format!("http://{address}/orders"),
+            b"{\"sku\":\"A1\"}".to_vec(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 503);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "a retried POST can create two orders"
+    );
+}
+
+#[tokio::test]
+async fn a_post_is_retried_when_the_flag_says_so() {
+    let (address, count) = start_flaky_server(vec![503]).await;
+    let client = HttpClient::with_config(retrying(3).retrying_non_idempotent()).unwrap();
+
+    let response = client
+        .send(request(
+            Method::Post,
+            format!("http://{address}/orders"),
+            b"{\"sku\":\"A1\"}".to_vec(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.attempts, 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_deadline_that_expires_is_retried() {
+    // The first request is answered too late to count; the second answers at once.
+    // The client default is impossible to meet on purpose, so the request's own
+    // deadline is provably what bounds a send and what the retry reaches past.
+    let (address, count) = start_slow_then_fast_server(Duration::from_millis(400)).await;
+    let client = HttpClient::with_config(ClientConfig {
+        request_timeout: Some(Duration::from_nanos(1)),
+        ..retrying(2)
+    })
+    .unwrap();
+
+    let mut prepared = request(Method::Get, format!("http://{address}/slow"), vec![]);
+    prepared.timeout = Some(Duration::from_millis(100));
+
+    let response = client.send(prepared).await.unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.attempts, 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_refused_connection_is_retried() {
+    // A port that was bound and let go: connecting is refused, not answered, which is
+    // a transport failure worth another attempt.
+    let address = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let client = HttpClient::with_config(retrying(2)).unwrap();
+
+    let error = client
+        .send(get(format!("http://{address}/nowhere")))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, HttpError::Request(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn the_wait_follows_the_servers_retry_after() {
+    // `Retry-After: 1` is longer than the 5ms backoff, so a client that ignored it
+    // would be back in milliseconds. A real server may ask for far more than a test
+    // can sit through, which is why the config caps what it is obeyed for.
+    let address = start_rate_limited_server().await;
+    let client = HttpClient::with_config(retrying(2)).unwrap();
+
+    let started = Instant::now();
+    let response = client
+        .send(get(format!("http://{address}/limited")))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.attempts, 2);
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "the server was not listened to: {:?}",
+        started.elapsed()
+    );
+}
+
+/// A server whose first request is answered after `delay`, and every later one at once.
+async fn start_slow_then_fast_server(delay: Duration) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+
+    let counter = requests.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(_) => break,
+            };
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |_request: Request<Incoming>| {
+                    let counter = counter.clone();
+                    async move {
+                        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                            tokio::time::sleep(delay).await;
+                        }
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(200)
+                                .body(Full::new(Bytes::from("ok")))
+                                .unwrap(),
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    (address, requests)
+}
+
+/// A server that answers `429 Retry-After: 1` once, then 200.
+async fn start_rate_limited_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(_) => break,
+            };
+            let requests = requests.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |_request: Request<Incoming>| {
+                    let requests = requests.clone();
+                    async move {
+                        let first = requests.fetch_add(1, Ordering::SeqCst) == 0;
+                        let response = if first {
+                            Response::builder()
+                                .status(429)
+                                .header("retry-after", "1")
+                                .body(Full::new(Bytes::from("slow down")))
+                                .unwrap()
+                        } else {
+                            Response::builder()
+                                .status(200)
+                                .body(Full::new(Bytes::from("ok")))
+                                .unwrap()
+                        };
+                        Ok::<_, Infallible>(response)
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    address
 }

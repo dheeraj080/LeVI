@@ -10,7 +10,7 @@
 //! number-one memory bug in naive load tools, so the load path cannot do it by
 //! accident — it does not have a buffering call to reach for.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -21,7 +21,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 
-use lev_core::PreparedRequest;
+use lev_core::{Method, PreparedRequest};
 
 use crate::config::ClientConfig;
 use crate::error::HttpError;
@@ -44,6 +44,10 @@ pub struct Response {
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
     pub timings: Timings,
+    /// How many attempts this response took. 1 is the common case; more means an
+    /// earlier attempt failed transiently and the client asked again. The timings
+    /// describe *this* attempt — the waits between attempts are not server latency.
+    pub attempts: u32,
 }
 
 /// A load-mode response: the status and body length, never the body.
@@ -97,7 +101,58 @@ impl HttpClient {
     /// Send a resolved request and buffer the response.
     ///
     /// Bounded by `request.timeout`, falling back to the config's request timeout.
+    ///
+    /// A transient failure is retried per [`ClientConfig::retries`]: up to that many
+    /// more attempts, on a backoff that doubles. A retry needs the request built again
+    /// and building consumes it, so a client with retries configured keeps one spare
+    /// copy of the request — and a client without, which is every load-path request,
+    /// keeps none.
     pub async fn send(&self, request: PreparedRequest) -> Result<Response, HttpError> {
+        let max_attempts = self.max_attempts(&request);
+        let spare = if max_attempts > 1 {
+            Some(request.clone())
+        } else {
+            None
+        };
+
+        let mut attempt = 1u32;
+        let mut current = Some(request);
+        loop {
+            let owned = current.take().expect("each attempt owns its request");
+            match self.send_once(owned, attempt).await {
+                Ok(response) => {
+                    match self.pause_before(attempt, max_attempts, Outcome::Response(&response)) {
+                        Some(delay) => {
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                            current = spare.clone();
+                        }
+                        None => return Ok(response),
+                    }
+                }
+                Err(error) => {
+                    match self.pause_before(attempt, max_attempts, Outcome::Failure(&error)) {
+                        Some(delay) => {
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                            current = spare.clone();
+                        }
+                        None => return Err(error),
+                    }
+                }
+            }
+        }
+    }
+
+    /// One attempt: build, send, buffer, and time the exchange.
+    ///
+    /// The response carries `attempt`, so a retry ends up reported instead of being
+    /// presented as one slow request.
+    async fn send_once(
+        &self,
+        request: PreparedRequest,
+        attempt: u32,
+    ) -> Result<Response, HttpError> {
         let deadline = self.deadline_for(&request);
         let outgoing = build_request(request)?;
 
@@ -133,7 +188,57 @@ impl HttpClient {
             headers,
             body,
             timings: timings_since(ttfb, total),
+            attempts: attempt,
         })
+    }
+
+    /// How many attempts this client is allowed to make for `request`.
+    ///
+    /// A method that is not safe to send twice gets exactly one, unless the config
+    /// says otherwise out loud: a retried POST can create two orders, and no default
+    /// gets to make that decision.
+    fn max_attempts(&self, request: &PreparedRequest) -> u32 {
+        if self.config.retries == 0 {
+            return 1;
+        }
+        if self.config.retry_non_idempotent || is_idempotent(&request.method) {
+            self.config.retries.saturating_add(1)
+        } else {
+            1
+        }
+    }
+
+    /// How long to wait before another attempt, or `None` if this outcome stands.
+    ///
+    /// The pause is an exponential backoff, never longer than the config allows, and
+    /// at least as long as the server asked for when it answered `Retry-After` — a
+    /// server that says "come back in two seconds" is better informed than a schedule.
+    fn pause_before(
+        &self,
+        attempt: u32,
+        max_attempts: u32,
+        outcome: Outcome<'_>,
+    ) -> Option<Duration> {
+        if attempt >= max_attempts {
+            return None;
+        }
+
+        let server_wait = match outcome {
+            Outcome::Response(response) if is_transient_status(response.status) => {
+                parse_retry_after(&response.headers)
+                    .map(|wait| wait.min(self.config.retry_after_max))
+            }
+            Outcome::Response(_) => return None,
+            Outcome::Failure(error) if is_transient_error(error) => None,
+            Outcome::Failure(_) => return None,
+        };
+
+        let backoff = self
+            .config
+            .retry_backoff
+            .saturating_mul(1u32 << (attempt - 1).min(16))
+            .min(self.config.retry_backoff_max);
+        Some(server_wait.map_or(backoff, |wait| wait.max(backoff)))
     }
 
     /// Send a resolved request, counting and discarding the response body.
@@ -142,6 +247,12 @@ impl HttpClient {
     /// only its length is kept, so memory does not scale with response size. The
     /// deadline covers the body too — a target that dribbles bytes forever is a
     /// target that would otherwise hang the run.
+    ///
+    /// It never retries, whatever the config says. A load report is a statement about
+    /// what the target saw; a retry loop would fold three requests into one sample and
+    /// quietly call the slowest of them "the" latency. The load sender builds its
+    /// client with retries pinned to zero, so this is a property of the spine rather
+    /// than a convention somebody has to remember.
     pub async fn send_discarding(
         &self,
         request: PreparedRequest,
@@ -220,5 +331,99 @@ fn timings_since(ttfb: std::time::Duration, total: std::time::Duration) -> Timin
         dns: None,
         connect: None,
         tls: None,
+    }
+}
+
+/// What one attempt produced, as far as a retry decision is concerned.
+enum Outcome<'a> {
+    /// A response arrived. Its `Retry-After` may still be worth honouring.
+    Response(&'a Response),
+    /// The exchange failed: a refusal, a reset, a deadline.
+    Failure(&'a HttpError),
+}
+
+/// Statuses that mean "this one might work next time".
+///
+/// A 429 says the target is rate limiting, and 502/503/504 say a hop in the middle is
+/// unhappy. A 500 is deliberately absent: the target *did* process the request and
+/// failed, and repeating it may either fail the same way or, worse, succeed twice.
+fn is_transient_status(status: u16) -> bool {
+    matches!(status, 429 | 502 | 503 | 504)
+}
+
+/// Transport failures worth trying again: a refusal, a reset, a deadline, a body that
+/// stopped part-way.
+///
+/// Configuration mistakes are not among them. They would fail identically twice, and
+/// a backoff would only make a bad URL expensive instead of immediate.
+fn is_transient_error(error: &HttpError) -> bool {
+    matches!(
+        error,
+        HttpError::Request(_) | HttpError::Body(_) | HttpError::Timeout { .. }
+    )
+}
+
+/// Whether `method` is safe to send twice (RFC 9110 §9.2.2).
+fn is_idempotent(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::Get | Method::Head | Method::Options | Method::Put | Method::Delete
+    )
+}
+
+/// `Retry-After` as a wait, when the server gave the seconds form.
+///
+/// The HTTP-date form is ignored: it needs a correct clock, and a clock is the one
+/// thing a retry loop must not trust. Ignoring a wait is the safe direction — the
+/// backoff applies instead, and the request goes out sooner rather than later.
+fn parse_retry_after(headers: &[(String, String)]) -> Option<Duration> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_is_read_as_seconds() {
+        let headers = |value: &str| vec![("Retry-After".to_string(), value.to_string())];
+        assert_eq!(
+            parse_retry_after(&headers("2")),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            parse_retry_after(&headers(" 3 ")),
+            Some(Duration::from_secs(3))
+        );
+        // The date form has no clock to be read with, and a word is not a wait.
+        assert_eq!(
+            parse_retry_after(&headers("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(parse_retry_after(&headers("soon")), None);
+        assert_eq!(parse_retry_after(&headers("12, 34")), None);
+        assert_eq!(parse_retry_after(&[]), None);
+    }
+
+    #[test]
+    fn only_a_method_that_survives_a_second_send_is_idempotent() {
+        assert!(is_idempotent(&Method::Get));
+        assert!(is_idempotent(&Method::Delete));
+        assert!(!is_idempotent(&Method::Post));
+        assert!(!is_idempotent(&Method::Patch));
+        assert!(!is_idempotent(&Method::Custom("PURGE".to_string())));
+    }
+
+    #[test]
+    fn a_five_hundred_is_not_transient_but_a_five_zero_three_is() {
+        assert!(!is_transient_status(500));
+        assert!(!is_transient_status(200));
+        for status in [429, 502, 503, 504] {
+            assert!(is_transient_status(status), "{status}");
+        }
     }
 }

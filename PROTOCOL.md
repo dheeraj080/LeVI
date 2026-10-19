@@ -165,7 +165,8 @@ child the user spawned themselves — never to a remote agent.
     "headers": [{ "name": "content-type", "value": "application/json" }],
     "body": "{\"ok\":true}",
     "bodyLen": 11,
-    "timings": { "totalMs": 9.09, "ttfbMs": 8.93, "receiveMs": 0.158 }
+    "timings": { "totalMs": 9.09, "ttfbMs": 8.93, "receiveMs": 0.158 },
+    "attempts": 1
   },
   "checks": [
     { "name": "status is 201", "passed": true },
@@ -186,6 +187,13 @@ UI renders as "what went out", and it never contains a secret. The echo is compu
 
 `timings` carries milliseconds. `dnsMs`, `connectMs` and `tlsMs` are omitted until the
 instrumented connector lands.
+
+`attempts` is how many times the client sent the request before this response came back.
+It is `1` unless the client was configured to retry a transient failure (`429`, `502`,
+`503`, `504`, a refused connection, a reset, a deadline) *and* the method was safe to
+send twice; a `3` therefore says "two refusals happened before this one, and the report
+is not hiding them". `timings` describes the attempt that answered, not the waits in
+between. A peer that predates v0.3 omits the field, and its absence means `1`.
 
 ### `stop`
 
@@ -289,11 +297,17 @@ exists. The envelope is already designed to carry them.
 |---|---|---|
 | `sendRequest.request.timeoutMs` | client -> engine | overall deadline in ms; absent = engine default, never unbounded |
 | `sendRequest.request.body` | client -> engine | gains the `bytes` kind: `{ "kind": "bytes", "contentType"?, "base64" }` |
+| `requestResult.response.attempts` | engine -> client | how many sends it took; absent = 1 |
 
 `PROTOCOL_VERSION` is `0.3`. A deadline that expires is reported as `error` with
 `code: "engine"` (the target failed to answer, not the request definition) — no new
 error code was introduced. Engines that predate v0.3 ignore the field and apply their
 own default, which is still bounded.
+
+`attempts` reports how many sends a response took, so a client can say "three attempts"
+instead of presenting a retried success as a single slow one. Retrying stays a *client*
+policy and is not expressible in a request: a collection cannot ask for it, so a load run
+cannot inherit one, and every request in a load report is one the target actually saw.
 
 The `bytes` body kind is additive: a body read from a file travels base64, so the
 engine needs no filesystem access. The *client* opens the file — it is the side that

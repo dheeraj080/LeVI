@@ -12,7 +12,7 @@ use std::sync::Arc;
 use lev_core::{
     prepare_request_with_seed, Check, MapSecretStore, Redactor, SecretStore, VarSet, VarValue,
 };
-use lev_http::HttpClient;
+use lev_http::{ClientConfig, HttpClient};
 use lev_protocol::{
     negotiate, EchoDto, EnvDto, ErrorCode, LogLevel, Message, RequestDto, ResponseDto, Transport,
     PROTOCOL_VERSION,
@@ -72,6 +72,34 @@ impl Engine {
     pub fn from_store(store: MapSecretStore) -> Result<Self, EngineError> {
         let redactor = crate::secrets::redactor_for(&store);
         Self::new(Arc::new(store), redactor)
+    }
+
+    /// Replace the transport policy this engine sends with.
+    ///
+    /// Timeouts, retries and pool sizing belong to the client, not to the collection:
+    /// a request file says *what* to send, and how hard to try again is a decision
+    /// about the client's own time and about the target's load.
+    pub fn with_client_config(mut self, config: ClientConfig) -> Result<Self, EngineError> {
+        self.http = HttpClient::with_config(config)?;
+        Ok(self)
+    }
+
+    /// Retry a transient failure up to `retries` more times on an idempotent request.
+    ///
+    /// `retry_non_idempotent` lifts that restriction for a target known to be safe
+    /// with it. The policy is set here, by whoever runs the engine — a collection
+    /// cannot express it, because a load run must never inherit a retry from a file.
+    pub fn with_retries(
+        mut self,
+        retries: u32,
+        retry_non_idempotent: bool,
+    ) -> Result<Self, EngineError> {
+        let mut config = ClientConfig::default().with_retries(retries);
+        if retry_non_idempotent {
+            config = config.retrying_non_idempotent();
+        }
+        self.http = HttpClient::with_config(config)?;
+        Ok(self)
     }
 
     /// Serve one session to completion over `transport`.
