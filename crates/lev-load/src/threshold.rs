@@ -50,9 +50,7 @@ pub(crate) fn abort_trigger(
     thresholds
         .iter()
         .zip(results)
-        .find(|(threshold, result)| {
-            !result.passed && abort_on.contains(&threshold.metric)
-        })
+        .find(|(threshold, result)| !result.passed && abort_on.contains(&threshold.metric))
         .map(|(threshold, _)| threshold.metric)
 }
 
@@ -154,7 +152,12 @@ mod tests {
         recorder.snapshot(std::time::Duration::from_secs(1), std::time::Duration::ZERO)
     }
 
-    fn evaluate(threshold: &str, metric: &str, snapshot: &MetricSnapshot, histogram: &Histogram<u64>) -> ThresholdResult {
+    fn evaluate(
+        threshold: &str,
+        metric: &str,
+        snapshot: &MetricSnapshot,
+        histogram: &Histogram<u64>,
+    ) -> ThresholdResult {
         let parsed = Threshold::parse(metric, threshold).unwrap();
         evaluate_thresholds(&[parsed], snapshot, histogram)
             .into_iter()

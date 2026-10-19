@@ -3,7 +3,7 @@
 //! assertions, and the exit-code contract (0 when checks pass, 1 when one fails).
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
 use wiremock::matchers::{method, path};
@@ -148,4 +148,65 @@ scripts:
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error:"), "{stderr}");
+}
+
+#[tokio::test]
+async fn a_timeout_is_an_engine_error_and_the_flag_wins() {
+    // The target answers, but 60 s later. `--timeout 150ms` must cut it off: the
+    // request definition is fine, the target is too slow — that is exit 3 (engine).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/slow"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+        .mount(&server)
+        .await;
+
+    let dir = scratch_dir("timeout");
+    write_collection(&dir, &server.uri());
+    // The file asks for a generous deadline; the flag overrides it, proving the
+    // precedence (flag > request `timeout:`) end to end.
+    write_request(
+        &dir,
+        "slow.yaml",
+        "id: slow\nname: Slow\nmethod: GET\nurl: /slow\ntimeout: 30s\n",
+    );
+
+    let started = std::time::Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_levi"))
+        .args(["request", "requests/slow.yaml", "--timeout", "150ms"])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("run levi request");
+
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "stderr:\n{stderr}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the flag did not bound the send: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_zero_timeout_is_rejected_before_anything_is_sent() {
+    let dir = scratch_dir("timeout-zero");
+    write_collection(&dir, "http://127.0.0.1:1");
+    write_request(
+        &dir,
+        "thing.yaml",
+        "id: thing\nname: Thing\nmethod: GET\nurl: /thing\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_levi"))
+        .args(["request", "requests/thing.yaml", "--timeout", "0s"])
+        .current_dir(&dir)
+        .output()
+        .await
+        .expect("run levi request");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("greater than 0"), "stderr:\n{stderr}");
 }

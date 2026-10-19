@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use lev_core::PreparedRequest;
-use lev_http::HttpClient;
+use lev_http::{ClientConfig, HttpClient};
 
 use crate::error::LoadError;
 
@@ -35,9 +35,16 @@ pub struct HttpSender {
 }
 
 impl HttpSender {
+    /// A sender with the transport's default config (bounded connect and request).
     pub fn new() -> Result<Self, LoadError> {
+        Self::with_config(ClientConfig::default())
+    }
+
+    /// A sender with an explicit transport config — how a run applies its own
+    /// default request deadline (`timeout:` / `--timeout`).
+    pub fn with_config(config: ClientConfig) -> Result<Self, LoadError> {
         Ok(Self {
-            client: HttpClient::new()?,
+            client: HttpClient::with_config(config)?,
         })
     }
 }

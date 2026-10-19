@@ -347,7 +347,7 @@ fn headers_value(headers: &[(String, String)]) -> Value {
 ///
 /// A non-object (e.g. the script set it to `null`) leaves the request untouched.
 /// Headers are rebuilt from the object, so the script may remove one by deleting the
-/// key.
+/// key. The deadline is not scriptable and is always carried over from `original`.
 fn merge_request(value: &Value, original: &ScriptRequest) -> ScriptRequest {
     let Some(object) = value.as_object() else {
         return original.clone();
@@ -376,6 +376,7 @@ fn merge_request(value: &Value, original: &ScriptRequest) -> ScriptRequest {
             .get("body")
             .and_then(scalar_text)
             .unwrap_or_else(|| original.body.clone()),
+        timeout: original.timeout,
     }
 }
 
@@ -506,6 +507,8 @@ impl Rng {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -537,6 +540,7 @@ mod tests {
             url: "https://api.test/".to_string(),
             headers: vec![("Accept".to_string(), "application/json".to_string())],
             body: String::new(),
+            timeout: Some(Duration::from_secs(5)),
         };
         let value = json!({"method": "POST", "headers": {"X-Trace": "1"}});
         let merged = merge_request(&value, &original);
@@ -546,6 +550,8 @@ mod tests {
             merged.headers,
             vec![("X-Trace".to_string(), "1".to_string())]
         );
+        // The deadline is not scriptable: a rewrite cannot drop it.
+        assert_eq!(merged.timeout, original.timeout);
     }
 
     #[test]
@@ -555,6 +561,7 @@ mod tests {
             url: "u".to_string(),
             headers: Vec::new(),
             body: String::new(),
+            timeout: None,
         };
         assert_eq!(merge_request(&Value::Null, &original), original);
     }

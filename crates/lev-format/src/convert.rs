@@ -61,6 +61,7 @@ pub fn request_to_core(dto: RequestDto) -> Result<RequestDef, FormatError> {
         auth: dto.auth.map(auth_to_core).transpose()?,
         scripts: scripts_to_core(dto.scripts),
         assertions: dto.assertions.into_iter().map(assertion_to_core).collect(),
+        timeout: dto.timeout.as_ref().map(duration_to_core).transpose()?,
     })
 }
 
@@ -82,6 +83,9 @@ pub fn request_from_core(request: &RequestDef) -> RequestDto {
         auth: request.auth.as_ref().map(auth_from_core),
         scripts: scripts_from_core(&request.scripts),
         assertions: request.assertions.iter().map(assertion_from_core).collect(),
+        timeout: request
+            .timeout
+            .map(|duration| DurationDto::Text(format_duration(duration))),
     }
 }
 
@@ -303,9 +307,10 @@ pub fn scenario_to_core(dto: ScenarioDto) -> Result<Scenario, FormatError> {
     let mut thresholds: Vec<Threshold> = Vec::new();
     for (metric_name, expressions) in &dto.thresholds {
         for expression in expressions {
-            thresholds.push(Threshold::parse(metric_name, expression).map_err(|error| {
-                FormatError::InvalidScenario(error.to_string())
-            })?);
+            thresholds.push(
+                Threshold::parse(metric_name, expression)
+                    .map_err(|error| FormatError::InvalidScenario(error.to_string()))?,
+            );
         }
     }
 
@@ -334,6 +339,7 @@ pub fn scenario_to_core(dto: ScenarioDto) -> Result<Scenario, FormatError> {
         steps,
         thresholds,
         abort_on,
+        timeout: dto.timeout.as_ref().map(duration_to_core).transpose()?,
     })
 }
 
@@ -376,6 +382,9 @@ pub fn scenario_from_core(scenario: &Scenario) -> ScenarioDto {
             .collect(),
         thresholds: thresholds_map,
         abort_on,
+        timeout: scenario
+            .timeout
+            .map(|duration| DurationDto::Text(format_duration(duration))),
     }
 }
 

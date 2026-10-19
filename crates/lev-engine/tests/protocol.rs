@@ -6,6 +6,7 @@
 //! than hanging or panicking.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use lev_core::{MapSecretStore, Redactor};
 use lev_engine::{in_process_client, Client, Engine, EngineError};
@@ -36,6 +37,7 @@ fn get_request(url: String) -> RequestDto {
         auth: None,
         scripts: None,
         assertions: vec![],
+        timeout_ms: None,
     }
 }
 
@@ -249,6 +251,41 @@ async fn an_unresolvable_variable_is_a_configuration_error() {
         .expect_err("should fail");
 
     assert_eq!(error.code(), ErrorCode::Config);
+
+    client.stop(true).await.expect("stop");
+    drop(client);
+    handle.await.expect("join").expect("serve");
+}
+
+#[tokio::test]
+async fn a_deadline_crosses_the_wire_and_bounds_a_slow_target() {
+    // The target answers, but far too late: the request's `timeoutMs` must cut it
+    // off, and a target that failed to answer in time is an *engine* error — the
+    // request definition was fine, the network was not.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/slow"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+        .mount(&server)
+        .await;
+
+    let engine = engine_with_secret("token", "s3cr3t-token");
+    let (mut client, handle) = in_process_client(engine, 8).await.expect("connect");
+
+    let mut request = get_request(format!("{}/slow", server.uri()));
+    request.timeout_ms = Some(150);
+
+    let started = std::time::Instant::now();
+    let error = client
+        .send_request(request, bearer_env("token", None))
+        .await
+        .expect_err("the deadline should fire first");
+
+    assert_eq!(error.code(), ErrorCode::Engine);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the deadline did not bound the send"
+    );
 
     client.stop(true).await.expect("stop");
     drop(client);

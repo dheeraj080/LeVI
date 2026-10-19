@@ -42,6 +42,7 @@ fn compiled_scenario(
             auth: None,
             scripts: Default::default(),
             assertions: Vec::new(),
+            timeout: None,
         },
     );
 
@@ -55,6 +56,7 @@ fn compiled_scenario(
         }],
         thresholds,
         abort_on,
+        timeout: None,
     };
 
     let collection = Collection {
@@ -74,7 +76,13 @@ async fn a_run_measures_roughly_the_injected_latency() {
         .mount(&server)
         .await;
 
-    let scenario = compiled_scenario(&server.uri(), 2, Duration::from_millis(1200), Vec::new(), Vec::new());
+    let scenario = compiled_scenario(
+        &server.uri(),
+        2,
+        Duration::from_millis(1200),
+        Vec::new(),
+        Vec::new(),
+    );
     let config = RunConfig::new(
         RunId::new("run-1"),
         scenario,
@@ -233,8 +241,14 @@ async fn a_run_that_fails_a_plain_threshold_still_measures_everything() {
     .unwrap();
 
     assert_eq!(report.thresholds.len(), 2);
-    assert!(!report.thresholds[0].passed, "the rate threshold should fail");
-    assert!(report.thresholds[1].passed, "the count threshold should pass");
+    assert!(
+        !report.thresholds[0].passed,
+        "the rate threshold should fail"
+    );
+    assert!(
+        report.thresholds[1].passed,
+        "the count threshold should pass"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -245,7 +259,13 @@ async fn a_pre_cancelled_run_reports_aborted_and_sends_nothing() {
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    let scenario = compiled_scenario(&server.uri(), 2, Duration::from_secs(30), Vec::new(), Vec::new());
+    let scenario = compiled_scenario(
+        &server.uri(),
+        2,
+        Duration::from_secs(30),
+        Vec::new(),
+        Vec::new(),
+    );
 
     let cancel = CancellationToken::new();
     cancel.cancel();

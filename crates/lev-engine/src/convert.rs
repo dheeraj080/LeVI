@@ -40,6 +40,7 @@ pub fn request_from_dto(dto: RequestDto) -> Result<RequestDef, EngineError> {
         auth: dto.auth.map(auth_from_dto).transpose()?,
         scripts: scripts_from_dto(dto.scripts),
         assertions: dto.assertions.into_iter().map(assertion_from_dto).collect(),
+        timeout: dto.timeout_ms.map(Duration::from_millis),
     })
 }
 
@@ -62,6 +63,7 @@ pub fn request_to_dto(request: &RequestDef) -> RequestDto {
         auth: request.auth.as_ref().map(auth_to_dto),
         scripts: scripts_to_dto(&request.scripts),
         assertions: request.assertions.iter().map(assertion_to_dto).collect(),
+        timeout_ms: request.timeout.map(|duration| duration.as_millis() as u64),
     }
 }
 
@@ -365,6 +367,7 @@ mod tests {
             auth: Some(Auth::Bearer(Template::parse("{{token}}").unwrap())),
             scripts: Default::default(),
             assertions: Vec::new(),
+            timeout: Some(Duration::from_secs(3)),
         }
     }
 
@@ -423,6 +426,7 @@ mod tests {
             auth: None,
             scripts: None,
             assertions: vec![],
+            timeout_ms: None,
         };
         let error = request_from_dto(dto).unwrap_err();
         assert_eq!(error.code(), lev_protocol::ErrorCode::Config);

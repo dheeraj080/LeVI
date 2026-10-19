@@ -336,9 +336,7 @@ fn parse_stat(text: &str, metric: ThresholdMetric) -> Result<ThresholdStat, Stri
                 .parse::<f64>()
                 .map_err(|_| format!("`{other}` is not a percentile like `p(95)`"))?;
             if !(percentile > 0.0 && percentile <= 100.0) {
-                return Err(format!(
-                    "percentile {inner} is out of range (0 < p <= 100)"
-                ));
+                return Err(format!("percentile {inner} is out of range (0 < p <= 100)"));
             }
             Ok(ThresholdStat::Percentile(percentile))
         }
@@ -424,7 +422,10 @@ mod tests {
     fn an_unknown_metric_is_rejected_with_the_known_ones() {
         let error = Threshold::parse("http_req_latency", "p(95)<500").unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("unknown metric `http_req_latency`"), "{message}");
+        assert!(
+            message.contains("unknown metric `http_req_latency`"),
+            "{message}"
+        );
         assert!(message.contains("http_req_duration"), "{message}");
     }
 
@@ -436,7 +437,10 @@ mod tests {
 
         // A rate only exists where there is a total to divide by.
         let error = Threshold::parse("http_req_duration", "rate<0.01").unwrap_err();
-        assert!(error.to_string().contains("count, avg, min, max"), "{error}");
+        assert!(
+            error.to_string().contains("count, avg, min, max"),
+            "{error}"
+        );
 
         // Not everything is a trend.
         let error = Threshold::parse("checks_failed", "avg<1").unwrap_err();

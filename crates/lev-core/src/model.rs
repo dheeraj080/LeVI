@@ -6,6 +6,7 @@
 //! `lev-protocol`, and both convert to and from these types.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use crate::assert::Assertion;
 use crate::secrets::SecretName;
@@ -188,4 +189,7 @@ pub struct RequestDef {
     /// Declarative expectations, evaluated against the response after any
     /// post-response script. Each becomes a [`Check`](crate::Check) in the result.
     pub assertions: Vec<Assertion>,
+    /// The request's own deadline, as authored (`timeout: 5s`). Overrides the
+    /// transport's default request timeout; `None` means "use the transport's".
+    pub timeout: Option<Duration>,
 }

@@ -33,6 +33,7 @@ fn bare_request(method: &str, url: String) -> RequestDto {
         auth: None,
         scripts: None,
         assertions: vec![],
+        timeout_ms: None,
     }
 }
 

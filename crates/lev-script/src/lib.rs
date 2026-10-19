@@ -20,6 +20,7 @@
 //!     url: "https://api.test/".to_string(),
 //!     headers: Vec::new(),
 //!     body: String::new(),
+//!     timeout: None,
 //! };
 //! let outcome = sandbox.run(
 //!     "lev.test('has a url', function () { lev.expect(lev.request.url).toContain('http'); });",

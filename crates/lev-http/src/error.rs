@@ -22,4 +22,10 @@ pub enum HttpError {
 
     #[error("failed to read response body: {0}")]
     Body(String),
+
+    /// The request exceeded its deadline: the target (or the network) did not
+    /// answer in time. This is a *target* failure, not a configuration mistake,
+    /// so it maps to an `engine` error on the wire.
+    #[error("request timed out after {timeout:?}")]
+    Timeout { timeout: std::time::Duration },
 }

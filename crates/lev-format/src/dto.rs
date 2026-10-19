@@ -194,6 +194,10 @@ pub struct RequestDto {
     pub scripts: ScriptsDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<AssertionDto>,
+    /// The request's own deadline: `timeout: 5s`. Overrides the run or transport
+    /// default; absent means "use the default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<DurationDto>,
 }
 
 /// `environments/<env>.yaml`.
@@ -263,6 +267,10 @@ pub struct ScenarioDto {
     pub thresholds: BTreeMap<String, Vec<String>>,
     #[serde(default, rename = "abortOn", skip_serializing_if = "Vec::is_empty")]
     pub abort_on: Vec<String>,
+    /// The run's default request deadline: `timeout: 30s`. Applies to steps whose
+    /// request sets none; the CLI's `--timeout` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<DurationDto>,
 }
 
 fn default_method() -> String {

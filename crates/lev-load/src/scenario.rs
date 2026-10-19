@@ -42,6 +42,8 @@ pub struct CompiledScenario {
     pub thresholds: Vec<Threshold>,
     /// Metrics whose failure stops the run mid-flight.
     pub abort_on: Vec<ThresholdMetric>,
+    /// The run's default request deadline, applied to requests that set none.
+    pub timeout: Option<Duration>,
 }
 
 impl CompiledScenario {
@@ -94,6 +96,7 @@ impl CompiledScenario {
             steps,
             thresholds: scenario.thresholds.clone(),
             abort_on: scenario.abort_on.clone(),
+            timeout: scenario.timeout,
         })
     }
 }

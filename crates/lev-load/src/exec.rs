@@ -183,6 +183,7 @@ mod tests {
                 auth: None,
                 scripts: Default::default(),
                 assertions: Vec::new(),
+                timeout: None,
             },
         );
         let scenario = Scenario {
@@ -195,6 +196,7 @@ mod tests {
             }],
             thresholds: Vec::new(),
             abort_on: Vec::new(),
+            timeout: None,
         };
         Arc::new(CompiledScenario::compile(&scenario, &Collection::empty(), &requests).unwrap())
     }

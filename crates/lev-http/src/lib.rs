@@ -7,9 +7,11 @@
 #![forbid(unsafe_code)]
 
 mod client;
+pub mod config;
 pub mod error;
 pub mod timing;
 
 pub use client::{HttpClient, LoadResponse, Response};
+pub use config::ClientConfig;
 pub use error::HttpError;
 pub use timing::Timings;

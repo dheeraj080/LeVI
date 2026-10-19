@@ -6,6 +6,7 @@
 //! its own thread), so nothing here borrows.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use lev_core::{Check, PreparedRequest};
 
@@ -32,12 +33,16 @@ impl Phase {
 /// `headers` is exposed to JavaScript as a plain object (`name -> value`). A pre-request
 /// script that touches headers therefore collapses a duplicated request header name to
 /// one entry; this is documented and rare. `body` is the body as lossy UTF-8.
+///
+/// `timeout` is carried for round-tripping only — JavaScript cannot bind it — so a
+/// pre-request rewrite cannot silently drop the request's deadline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptRequest {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    pub timeout: Option<Duration>,
 }
 
 impl From<&PreparedRequest> for ScriptRequest {
@@ -47,6 +52,7 @@ impl From<&PreparedRequest> for ScriptRequest {
             url: prepared.url.clone(),
             headers: prepared.headers.clone(),
             body: String::from_utf8_lossy(&prepared.body).into_owned(),
+            timeout: prepared.timeout,
         }
     }
 }
@@ -55,13 +61,15 @@ impl ScriptRequest {
     /// Fold script mutations back into a request ready to dispatch.
     ///
     /// The method is normalised through [`lev_core::Method::parse`] so a script can set
-    /// it from a string, and the body is taken as UTF-8 bytes.
+    /// it from a string, and the body is taken as UTF-8 bytes. The deadline survives
+    /// the round trip (see [`ScriptRequest`]).
     pub fn into_prepared(self) -> PreparedRequest {
         PreparedRequest {
             method: lev_core::Method::parse(&self.method),
             url: self.url,
             headers: self.headers,
             body: self.body.into_bytes(),
+            timeout: self.timeout,
         }
     }
 }

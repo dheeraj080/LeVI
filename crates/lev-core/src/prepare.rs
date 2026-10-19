@@ -16,6 +16,8 @@
 //! overhead. A long-lived [`Context`] also means the dynamic functions
 //! (`{{$uuid}}`, `{{$randomInt}}`) keep advancing instead of repeating themselves.
 
+use std::time::Duration;
+
 use base64::Engine as _;
 
 use crate::context::Context;
@@ -31,6 +33,9 @@ pub struct PreparedRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// The effective deadline for this send: the authored `timeout:` if there is
+    /// one, carried through resolution so the transport never has to re-derive it.
+    pub timeout: Option<Duration>,
 }
 
 /// A request whose templates have been parsed once, ready to render many times.
@@ -46,6 +51,7 @@ pub struct CompiledRequest {
     headers: Vec<(Template, Template)>,
     body: CompiledBody,
     auth: Option<CompiledAuth>,
+    timeout: Option<Duration>,
 }
 
 /// A request body with its templates parsed. Mirrors [`Body`], with the source text
@@ -94,6 +100,7 @@ pub fn compile_request(collection: &Collection, request: &RequestDef) -> Result<
             .as_ref()
             .or(collection.auth.as_ref())
             .map(compile_auth),
+        timeout: request.timeout,
     })
 }
 
@@ -129,6 +136,7 @@ impl CompiledRequest {
             url,
             headers,
             body,
+            timeout: self.timeout,
         })
     }
 
@@ -356,6 +364,7 @@ mod tests {
             auth: None,
             scripts: Default::default(),
             assertions: Vec::new(),
+            timeout: None,
         }
     }
 
@@ -558,5 +567,21 @@ mod tests {
         req.body = Body::Json("{\"sku\": \"{{ oops\"".to_string());
         let result = compile_request(&collection(None), &req);
         assert!(matches!(result, Err(CoreError::TemplateParse { .. })));
+    }
+
+    #[test]
+    fn the_authored_timeout_survives_compilation() {
+        // The deadline is scope-independent, so it belongs on the compiled request:
+        // the load path must not re-derive it per iteration.
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/slow");
+        req.timeout = Some(Duration::from_secs(5));
+        let compiled = compile_request(&collection(None), &req).unwrap();
+        let mut ctx = Context::with_seed(vars(&[]), &store, 0);
+        let prepared = compiled.prepare(&mut ctx).unwrap();
+        assert_eq!(prepared.timeout, Some(Duration::from_secs(5)));
+
+        let one_shot = prepare_request(&collection(None), &req, vars(&[]), &store).unwrap();
+        assert_eq!(one_shot.timeout, Some(Duration::from_secs(5)));
     }
 }

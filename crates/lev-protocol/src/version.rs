@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The protocol version this build speaks.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 2);
+///
+/// v0.3 (minor): `sendRequest.request` gained the optional `timeoutMs` deadline.
+/// See `PROTOCOL.md` §9.
+pub const PROTOCOL_VERSION: Version = Version::new(0, 3);
 
 /// A `major.minor` protocol version.
 ///

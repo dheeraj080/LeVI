@@ -178,7 +178,10 @@ async fn a_failed_threshold_exits_one_and_prints_the_verdict() {
     let text = std::fs::read_to_string(&report_path).expect("report written");
     let report: serde_json::Value = serde_json::from_str(&text).expect("report is json");
     assert_eq!(report["outcome"], "completed");
-    assert!(report["thresholds"].as_array().unwrap().len() == 1, "{text}");
+    assert!(
+        report["thresholds"].as_array().unwrap().len() == 1,
+        "{text}"
+    );
     assert_eq!(report["thresholds"][0]["metric"], "http_req_failed");
     assert_eq!(report["thresholds"][0]["expression"], "rate<0.01");
     assert_eq!(report["thresholds"][0]["passed"], false);

@@ -58,7 +58,7 @@ async fn main() -> ExitCode {
 
 fn usage() -> String {
     format!(
-        "levi {version} — the request you already wrote is the load test
+        "levi {version} 
 
 USAGE:
     levi <COMMAND> [OPTIONS]
@@ -75,6 +75,8 @@ REQUEST OPTIONS:
     --collection <dir>   Collection directory (default: the request file's folder)
     --env <name>         Load environments/<name>.yaml
     --seed <n>           Seed for dynamic functions (uuid, timestamp, randomInt)
+    --timeout <dur>      Deadline per request, e.g. 30s or 500ms. Wins over the
+                         request's own `timeout:` [default: 30s]
     --show-body          Print the (redacted) response body
     --max-body <bytes>   Truncate the printed body [default: 4096]
 
@@ -83,6 +85,8 @@ RUN OPTIONS:
     --env <name>         Load environments/<name>.yaml
     --workers <n>        Worker threads [default: logical CPUs]
     --seed <n>           Base seed; each virtual user derives its own
+    --timeout <dur>      Deadline for every request in the run. Wins over request
+                         and scenario `timeout:` [default: 30s]
     --out <file>         Write a JSON report to <file>
     --quiet              Suppress the printed summary
 
@@ -209,7 +213,13 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
     let options = RequestOptions::parse(args)?;
     let format = Yaml;
 
-    let request = load_request(&format, &options.file)?;
+    let mut request = load_request(&format, &options.file)?;
+    // Precedence: `--timeout` (the flag wins) > the request's own `timeout:` > the
+    // run/scenario default > the transport default. The override is applied here,
+    // where files are loaded, so every layer below sees one resolved deadline.
+    if let Some(timeout) = options.timeout {
+        request.timeout = Some(timeout);
+    }
 
     let base_dir = options
         .collection
@@ -287,12 +297,20 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
     };
 
     // Every request in the collection is a candidate step target.
-    let requests = load_requests(&format, &base_dir.join("requests"))?;
+    let mut requests = load_requests(&format, &base_dir.join("requests"))?;
     if requests.is_empty() {
         return Err(Fail::config(format!(
             "no requests found under `{}`",
             base_dir.join("requests").display()
         )));
+    }
+    // Same precedence as `request`: the flag wins over per-request and per-scenario
+    // deadlines, so CI can bound a whole run with one flag regardless of what the
+    // files ask for.
+    if let Some(timeout) = options.timeout {
+        for request in requests.values_mut() {
+            request.timeout = Some(timeout);
+        }
     }
 
     // `global < collection < environment`; the engine still owns resolution.
@@ -676,6 +694,7 @@ struct RequestOptions {
     seed: u64,
     show_body: bool,
     max_body: usize,
+    timeout: Option<Duration>,
 }
 
 impl RequestOptions {
@@ -686,6 +705,7 @@ impl RequestOptions {
         let mut seed = 0u64;
         let mut show_body = false;
         let mut max_body = 4096usize;
+        let mut timeout = None;
 
         let mut index = 0;
         while index < args.len() {
@@ -705,6 +725,10 @@ impl RequestOptions {
                     seed = value.parse().map_err(|_| {
                         Fail::config(format!("--seed must be an integer, got `{value}`"))
                     })?;
+                }
+                "--timeout" => {
+                    index += 1;
+                    timeout = Some(parse_timeout_flag(next_value(args, index, "--timeout")?)?);
                 }
                 "--max-body" => {
                     index += 1;
@@ -739,8 +763,23 @@ impl RequestOptions {
             seed,
             show_body,
             max_body,
+            timeout,
         })
     }
+}
+
+/// Parse `--timeout`, rejecting a zero deadline: a request that must finish in
+/// zero time is a bug, not a configuration.
+fn parse_timeout_flag(value: &str) -> Result<Duration, Fail> {
+    let duration = lev_format::parse_duration(value).map_err(|_| {
+        Fail::config(format!(
+            "--timeout must be a duration like `5s` or `500ms`, got `{value}`"
+        ))
+    })?;
+    if duration.is_zero() {
+        return Err(Fail::config("--timeout must be greater than 0"));
+    }
+    Ok(duration)
 }
 
 fn next_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a str, Fail> {
@@ -757,6 +796,7 @@ struct RunOptions {
     seed: u64,
     out: Option<PathBuf>,
     quiet: bool,
+    timeout: Option<Duration>,
 }
 
 impl RunOptions {
@@ -768,6 +808,7 @@ impl RunOptions {
         let mut seed = 0u64;
         let mut out = None;
         let mut quiet = false;
+        let mut timeout = None;
 
         let mut index = 0;
         while index < args.len() {
@@ -803,6 +844,10 @@ impl RunOptions {
                     index += 1;
                     out = Some(PathBuf::from(next_value(args, index, "--out")?));
                 }
+                "--timeout" => {
+                    index += 1;
+                    timeout = Some(parse_timeout_flag(next_value(args, index, "--timeout")?)?);
+                }
                 "--quiet" => quiet = true,
                 "-h" | "--help" => {
                     print!("{}", usage());
@@ -830,6 +875,7 @@ impl RunOptions {
             seed,
             out,
             quiet,
+            timeout,
         })
     }
 }

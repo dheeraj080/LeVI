@@ -1,13 +1,17 @@
 # Levi wire protocol - v0
 
-**Status: frozen v0** (Phase 1; **v0.2** adds scripting in Phase 2). Until v1 the rules
-below may only be changed in backwards-compatible ways. The crate that implements this
-is `lev-protocol`.
+**Status: frozen v0** (Phase 1; **v0.2** adds scripting in Phase 2; **v0.3** adds
+per-request deadlines). Until v1 the rules below may only be changed in
+backwards-compatible ways. The crate that implements this is `lev-protocol`.
 
 > **v0.2 (minor):** `sendRequest.request` gains optional `scripts` and `assertions`;
 > `requestResult` gains optional `checks` and `logs`. All four are additive, so a v0.1
 > client ignores them and a v0.2 client against a v0.1 engine sees an empty check list.
 > See §8.
+>
+> **v0.3 (minor):** `sendRequest.request` gains the optional `timeoutMs` deadline in
+> milliseconds. Absent means "use the engine's default request timeout" — never
+> "unbounded". Additive; see §9.
 
 ## 1. Why one protocol
 
@@ -76,7 +80,7 @@ capability the engine did not advertise.
 ### `ready`
 
 ```json
-{ "type": "ready", "version": { "major": 0, "minor": 2 }, "engine": "0.0.0" }
+{ "type": "ready", "version": { "major": 0, "minor": 3 }, "engine": "0.0.0" }
 ```
 
 ### `sendRequest`
@@ -99,7 +103,8 @@ capability the engine did not advertise.
     "assertions": [
       { "kind": "status", "code": 201 },
       { "kind": "jsonPath", "path": "id", "equals": "{{thing_id}}" }
-    ]
+    ],
+    "timeoutMs": 5000
   },
   "env": {
     "vars": { "thing_id": "42", "api_token": { "secret": "smoke_token" } },
@@ -259,3 +264,14 @@ exists. The envelope is already designed to carry them.
 
 `PROTOCOL_VERSION` is `0.2`. A script failure is reported as `error` with
 `code: "config"` — no new error code was introduced.
+
+## 9. Changes in v0.3
+
+| Field | Direction | Meaning |
+|---|---|---|
+| `sendRequest.request.timeoutMs` | client -> engine | overall deadline in ms; absent = engine default, never unbounded |
+
+`PROTOCOL_VERSION` is `0.3`. A deadline that expires is reported as `error` with
+`code: "engine"` (the target failed to answer, not the request definition) — no new
+error code was introduced. Engines that predate v0.3 ignore the field and apply their
+own default, which is still bounded.

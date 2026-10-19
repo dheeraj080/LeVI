@@ -23,6 +23,7 @@ use hyper_util::rt::TokioExecutor;
 
 use lev_core::PreparedRequest;
 
+use crate::config::ClientConfig;
 use crate::error::HttpError;
 use crate::timing::Timings;
 
@@ -32,6 +33,7 @@ type RequestBody = Full<Bytes>;
 /// A pooled HTTP/1.1 + HTTP/2 client.
 pub struct HttpClient {
     client: Client<Connector, RequestBody>,
+    config: ClientConfig,
 }
 
 /// A fully buffered response, with timing. Interactive path only.
@@ -55,33 +57,63 @@ pub struct LoadResponse {
 }
 
 impl HttpClient {
-    /// Build a client that trusts the OS certificate store.
+    /// Build a client with the default [`ClientConfig`]: bounded connect, bounded
+    /// request, pooled connections with a finite idle life.
     pub fn new() -> Result<Self, HttpError> {
+        Self::with_config(ClientConfig::default())
+    }
+
+    /// Build a client from an explicit config.
+    ///
+    /// The connect timeout is set on the connector itself (so a dead route fails as a
+    /// connect failure, fast); the request deadline is applied per send, because the
+    /// deadline that matters is the one the request carries, falling back to the
+    /// config's.
+    pub fn with_config(config: ClientConfig) -> Result<Self, HttpError> {
+        let mut http = HttpConnector::new();
+        http.set_connect_timeout(Some(config.connect_timeout));
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()
             .map_err(|error| HttpError::Tls(error.to_string()))?
             .https_or_http()
             .enable_http1()
             .enable_http2()
-            .build();
-        let client = Client::builder(TokioExecutor::new()).build(connector);
-        Ok(Self { client })
+            .wrap_connector(http);
+
+        let mut builder = Client::builder(TokioExecutor::new());
+        builder.pool_idle_timeout(config.pool_idle_timeout);
+        if let Some(max_idle) = config.pool_max_idle_per_host {
+            builder.pool_max_idle_per_host(max_idle);
+        }
+        let client = builder.build(connector);
+        Ok(Self { client, config })
+    }
+
+    /// The config this client was built with.
+    pub fn config(&self) -> &ClientConfig {
+        &self.config
     }
 
     /// Send a resolved request and buffer the response.
+    ///
+    /// Bounded by `request.timeout`, falling back to the config's request timeout.
     pub async fn send(&self, request: PreparedRequest) -> Result<Response, HttpError> {
+        let deadline = self.deadline_for(&request);
         let outgoing = build_request(request)?;
 
         let start = Instant::now();
-        let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
-        let ttfb = start.elapsed();
+        let exchange = async {
+            let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
+            let ttfb = start.elapsed();
 
-        let (parts, incoming) = response.into_parts();
-        let collected = incoming
-            .collect()
-            .await
-            .map_err(|error| HttpError::Body(error.to_string()))?;
-        let body = collected.to_bytes();
+            let (parts, incoming) = response.into_parts();
+            let collected = incoming
+                .collect()
+                .await
+                .map_err(|error| HttpError::Body(error.to_string()))?;
+            Ok::<_, HttpError>((parts, collected.to_bytes(), ttfb))
+        };
+        let (parts, body, ttfb) = await_deadline(exchange, deadline).await?;
         let total = start.elapsed();
 
         let headers = parts
@@ -107,25 +139,32 @@ impl HttpClient {
     /// Send a resolved request, counting and discarding the response body.
     ///
     /// This is the load path: the body is read to keep the connection healthy, but
-    /// only its length is kept, so memory does not scale with response size.
+    /// only its length is kept, so memory does not scale with response size. The
+    /// deadline covers the body too — a target that dribbles bytes forever is a
+    /// target that would otherwise hang the run.
     pub async fn send_discarding(
         &self,
         request: PreparedRequest,
     ) -> Result<LoadResponse, HttpError> {
+        let deadline = self.deadline_for(&request);
         let outgoing = build_request(request)?;
 
         let start = Instant::now();
-        let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
-        let ttfb = start.elapsed();
+        let exchange = async {
+            let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
+            let ttfb = start.elapsed();
 
-        let (parts, mut incoming) = response.into_parts();
-        let mut body_len: u64 = 0;
-        while let Some(frame) = incoming.frame().await {
-            let frame = frame.map_err(|error| HttpError::Body(error.to_string()))?;
-            if let Some(chunk) = frame.data_ref() {
-                body_len += chunk.len() as u64;
+            let (parts, mut incoming) = response.into_parts();
+            let mut body_len: u64 = 0;
+            while let Some(frame) = incoming.frame().await {
+                let frame = frame.map_err(|error| HttpError::Body(error.to_string()))?;
+                if let Some(chunk) = frame.data_ref() {
+                    body_len += chunk.len() as u64;
+                }
             }
-        }
+            Ok::<_, HttpError>((parts, body_len, ttfb))
+        };
+        let (parts, body_len, ttfb) = await_deadline(exchange, deadline).await?;
         let total = start.elapsed();
 
         Ok(LoadResponse {
@@ -133,6 +172,25 @@ impl HttpClient {
             body_len,
             timings: timings_since(ttfb, total),
         })
+    }
+
+    /// The deadline for one send: the request's own timeout if it has one, else the
+    /// client default. `None` means unbounded (test-only; see [`ClientConfig`]).
+    fn deadline_for(&self, request: &PreparedRequest) -> Option<std::time::Duration> {
+        request.timeout.or(self.config.request_timeout)
+    }
+}
+
+/// Run one exchange under an optional deadline.
+async fn await_deadline<T>(
+    exchange: impl std::future::Future<Output = Result<T, HttpError>>,
+    deadline: Option<std::time::Duration>,
+) -> Result<T, HttpError> {
+    match deadline {
+        Some(timeout) => tokio::time::timeout(timeout, exchange)
+            .await
+            .map_err(|_| HttpError::Timeout { timeout })?,
+        None => exchange.await,
     }
 }
 

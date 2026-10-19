@@ -8,8 +8,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: fmt, clippy, test, deny
+  lint:
+    name: fmt, clippy, deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,9 +25,6 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -36,6 +33,35 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
+      - name: License and advisory policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The suite runs on all three desktop OSes: the primary development machine is
+  # Windows, and a stdio/process test suite that only ever ran on Linux has never
+  # been tested at all. fmt/clippy/deny stay Linux-only - they are platform
+  # independent and there is no reason to pay for them three times.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test
         run: cargo nextest run --workspace
         env:
@@ -43,6 +69,45 @@ jobs:
 
       - name: Doc tests
         run: cargo test --workspace --doc
+        env:
+          RUSTC_WRAPPER: sccache
 
-      - name: License and advisory policy
-        uses: EmbarkStudios/cargo-deny-action@v2
+  # `rust-version = 1.89` in the workspace manifest is a promise to downstream
+  # users; this job keeps it honest instead of letting it drift upward with the
+  # stable channel everyone else builds on.
+  msrv:
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@1.89
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check the workspace at the declared MSRV
+        run: cargo check --workspace --all-targets
+
+  # Report-only for now: there is no honest baseline until the first number is
+  # measured. Add `--fail-under-lines <n>` once the ratchet starts.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate coverage summary
+        run: cargo llvm-cov --workspace --summary-only --doctests

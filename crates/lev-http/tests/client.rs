@@ -8,6 +8,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -18,7 +19,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 use lev_core::{Method, PreparedRequest};
-use lev_http::HttpClient;
+use lev_http::{ClientConfig, HttpClient, HttpError};
 
 /// Start an echo server on an ephemeral port; returns its address.
 async fn start_echo_server() -> SocketAddr {
@@ -59,6 +60,7 @@ fn request(method: Method, url: String, body: Vec<u8>) -> PreparedRequest {
         url,
         headers: vec![("accept".to_string(), "application/json".to_string())],
         body,
+        timeout: None,
     }
 }
 
@@ -130,4 +132,98 @@ async fn discarding_a_body_still_counts_it() {
     assert_eq!(response.body_len, expected_len);
     assert!(response.body_len > 0);
     assert!(response.timings.total >= response.timings.ttfb);
+}
+
+/// Accept connections and never answer — a target that hangs.
+async fn start_hung_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            // Hold the connection open without ever writing a response. The task
+            // dies with the test runtime, so there is no shutdown to manage.
+            tokio::spawn(async move {
+                let _stream = stream;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            });
+        }
+    });
+
+    address
+}
+
+#[tokio::test]
+async fn a_hung_target_cannot_outlive_the_requests_own_deadline() {
+    let address = start_hung_server().await;
+    // The client is configured with *no* default, so if this returns, the bound
+    // provably came from the request and not from the client config.
+    let client = HttpClient::with_config(ClientConfig::without_request_timeout()).unwrap();
+    let mut prepared = request(Method::Get, format!("http://{address}/slow"), vec![]);
+    prepared.timeout = Some(Duration::from_millis(150));
+
+    let started = Instant::now();
+    let error = client.send(prepared).await.unwrap_err();
+
+    assert!(
+        matches!(error, HttpError::Timeout { timeout } if timeout == Duration::from_millis(150)),
+        "expected a timeout, got {error:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the deadline did not bound the send"
+    );
+}
+
+#[tokio::test]
+async fn a_hung_target_cannot_outlive_the_client_default() {
+    let address = start_hung_server().await;
+    let client = HttpClient::with_config(ClientConfig {
+        request_timeout: Some(Duration::from_millis(150)),
+        ..ClientConfig::default()
+    })
+    .unwrap();
+    let prepared = request(Method::Get, format!("http://{address}/slow"), vec![]);
+
+    let started = Instant::now();
+    let error = client.send(prepared).await.unwrap_err();
+
+    assert!(
+        matches!(error, HttpError::Timeout { .. }),
+        "expected a timeout, got {error:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn the_load_path_is_bounded_too() {
+    // The discarding path must carry the same guarantee: a stuck response body
+    // holds a virtual user otherwise.
+    let address = start_hung_server().await;
+    let client = HttpClient::with_config(ClientConfig::without_request_timeout()).unwrap();
+    let mut prepared = request(Method::Get, format!("http://{address}/slow"), vec![]);
+    prepared.timeout = Some(Duration::from_millis(150));
+
+    let error = client.send_discarding(prepared).await.unwrap_err();
+    assert!(
+        matches!(error, HttpError::Timeout { .. }),
+        "expected a timeout, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_requests_own_deadline_beats_the_client_default() {
+    let address = start_echo_server().await;
+    // The client default is impossible to meet; only the request's own deadline
+    // can be in force for this send to succeed.
+    let client = HttpClient::with_config(ClientConfig {
+        request_timeout: Some(Duration::from_nanos(1)),
+        ..ClientConfig::default()
+    })
+    .unwrap();
+    let mut prepared = request(Method::Get, format!("http://{address}/ping"), vec![]);
+    prepared.timeout = Some(Duration::from_secs(10));
+
+    let response = client.send(prepared).await.unwrap();
+    assert_eq!(response.status, 200);
 }

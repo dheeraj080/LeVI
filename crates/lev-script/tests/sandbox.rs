@@ -17,6 +17,7 @@ fn request() -> ScriptRequest {
         url: "https://api.test/things".to_string(),
         headers: vec![("Accept".to_string(), "application/json".to_string())],
         body: String::new(),
+        timeout: None,
     }
 }
 

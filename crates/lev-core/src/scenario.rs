@@ -77,6 +77,10 @@ pub struct Scenario {
     /// the end. Each name must also have a threshold; the format layer rejects a name
     /// that does not, because an abort rule with no rule behind it can never fire.
     pub abort_on: Vec<ThresholdMetric>,
+    /// The run's default request deadline (`timeout: 30s`), applied to requests that
+    /// do not set their own. A load run must never inherit an unbounded request:
+    /// one stuck request would hold a virtual user forever.
+    pub timeout: Option<Duration>,
 }
 
 impl Scenario {
@@ -125,6 +129,7 @@ mod tests {
             }],
             thresholds: Vec::new(),
             abort_on: Vec::new(),
+            timeout: None,
         };
         assert!(scenario.is_runnable());
         assert!(!scenario.has_thresholds());
@@ -146,8 +151,10 @@ mod tests {
             }],
             thresholds: vec![threshold],
             abort_on: vec![ThresholdMetric::HttpReqFailed],
+            timeout: Some(Duration::from_secs(30)),
         };
         assert!(scenario.has_thresholds());
+        assert_eq!(scenario.timeout, Some(Duration::from_secs(30)));
         assert!(scenario.aborts_on(ThresholdMetric::HttpReqFailed));
         assert!(!scenario.aborts_on(ThresholdMetric::HttpReqs));
     }

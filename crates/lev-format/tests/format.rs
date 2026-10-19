@@ -6,6 +6,7 @@
 //! with no change.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use lev_format::{format_duration, parse_duration, DocumentFormat, Yaml};
 
@@ -256,6 +257,33 @@ fn thresholds_and_abort_rules_parse_into_the_domain() {
     assert_eq!(rate.value, 0.01);
 
     assert_eq!(scenario.abort_on, vec![ThresholdMetric::HttpReqFailed]);
+}
+
+#[test]
+fn timeouts_parse_into_the_domain_and_round_trip() {
+    let format = Yaml;
+
+    let request = format
+        .request_from_str("id: r\nname: R\nmethod: GET\nurl: https://api.test/slow\ntimeout: 5s\n")
+        .unwrap();
+    assert_eq!(request.timeout, Some(Duration::from_secs(5)));
+
+    // Absent means "use the default" — the parser must not invent a deadline.
+    let bare = format
+        .request_from_str("id: r\nname: R\nmethod: GET\nurl: https://api.test/\n")
+        .unwrap();
+    assert_eq!(bare.timeout, None);
+
+    let scenario = format
+        .scenario_from_str(
+            "id: s\nname: S\nexecutor:\n  constantVus: { vus: 1, duration: 1s }\nsteps:\n  - request: r\ntimeout: 30s\n",
+        )
+        .unwrap();
+    assert_eq!(scenario.timeout, Some(Duration::from_secs(30)));
+
+    // And the rendered form keeps the authored value, spelled canonically.
+    let rendered = format.scenario_to_string(&scenario).unwrap();
+    assert!(rendered.contains("timeout: 30s"), "{rendered}");
 }
 
 #[test]

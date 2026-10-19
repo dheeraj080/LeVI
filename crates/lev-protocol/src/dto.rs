@@ -175,6 +175,10 @@ pub struct RequestDto {
     pub scripts: Option<ScriptsDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertions: Vec<AssertionDto>,
+    /// The request's own deadline in milliseconds; the engine cuts the send off there.
+    /// Absent means "use the engine's default request timeout" — never "unbounded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 /// The scope a request is resolved against.
@@ -308,10 +312,30 @@ mod tests {
             auth: None,
             scripts: None,
             assertions: vec![],
+            timeout_ms: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         // Empty collections are omitted entirely.
         assert!(!json.contains("headers"), "{json}");
+        assert_eq!(serde_json::from_str::<RequestDto>(&json).unwrap(), request);
+    }
+
+    #[test]
+    fn a_deadline_crosses_the_wire_in_milliseconds() {
+        let request = RequestDto {
+            id: "r1".to_string(),
+            name: "R".to_string(),
+            method: "GET".to_string(),
+            url: "/".to_string(),
+            headers: vec![],
+            body: None,
+            auth: None,
+            scripts: None,
+            assertions: vec![],
+            timeout_ms: Some(5_000),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"timeoutMs\":5000"), "{json}");
         assert_eq!(serde_json::from_str::<RequestDto>(&json).unwrap(), request);
     }
 
@@ -337,6 +361,7 @@ mod tests {
                 },
                 AssertionDto::ResponseTimeUnder { max_ms: 500 },
             ],
+            timeout_ms: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"preRequest\":\"lev.log('hi');\""), "{json}");

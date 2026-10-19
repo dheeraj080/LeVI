@@ -34,8 +34,10 @@
 //! partial report flagged `aborted` instead of a hard kill.
 //!
 //! Still not here, and named so the gaps stay on the record: open/ramping executors,
-//! coordinated-omission correction, scripts and assertions under load, and a request
-//! timeout in the transport — which is what would bound the drain of a *stuck* request.
+//! coordinated-omission correction, and scripts and assertions under load. Request
+//! deadlines *are* here: every send is bounded by the request's own `timeout:`, the
+//! run's default, or the transport default — in that order — so a stuck target costs
+//! one iteration, not a stuck virtual user.
 
 #![forbid(unsafe_code)]
 
@@ -60,6 +62,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lev_core::secrets::SecretStore;
 use lev_core::{Context, VarSet};
+use lev_http::ClientConfig;
 use lev_metrics::{MetricsRecorder, RunId, RunOutcome, RunReport, StopReason};
 use tokio_util::sync::CancellationToken;
 
@@ -98,6 +101,10 @@ pub struct RunConfig {
     pub cancel: CancellationToken,
     /// How long to wait for in-flight iterations after a stop.
     pub graceful_stop: Duration,
+    /// The run's default request deadline, applied to requests that set none.
+    /// `None` leaves the transport default (30 s); an explicit `timeout:` on a
+    /// request always wins over this.
+    pub request_timeout: Option<Duration>,
 }
 
 impl RunConfig {
@@ -119,6 +126,7 @@ impl RunConfig {
             clock: Arc::new(TokioClock::new()),
             cancel: CancellationToken::new(),
             graceful_stop: DEFAULT_GRACEFUL_STOP,
+            request_timeout: None,
         }
     }
 
@@ -145,6 +153,13 @@ impl RunConfig {
         self.graceful_stop = graceful_stop;
         self
     }
+
+    /// Set the run's default request deadline (`--timeout`), applied to requests
+    /// that set none.
+    pub fn with_request_timeout(mut self, request_timeout: Option<Duration>) -> Self {
+        self.request_timeout = request_timeout;
+        self
+    }
 }
 
 fn default_worker_count() -> usize {
@@ -158,7 +173,14 @@ pub async fn run(
     config: RunConfig,
     reporters: &mut [Box<dyn Reporter>],
 ) -> Result<RunReport, LoadError> {
-    let sender: Arc<dyn Sender> = Arc::new(HttpSender::new()?);
+    // The run's default deadline: an explicit config wins, then the scenario's own
+    // `timeout:`; `None` keeps the transport default. A request's own timeout
+    // still beats both, because the transport checks the request first.
+    let mut sender_config = ClientConfig::default();
+    if let Some(timeout) = config.request_timeout.or(config.scenario.timeout) {
+        sender_config.request_timeout = Some(timeout);
+    }
+    let sender: Arc<dyn Sender> = Arc::new(HttpSender::with_config(sender_config)?);
     run_with(config, sender, reporters).await
 }
 
@@ -215,17 +237,8 @@ pub async fn run_with(
                 .build()
                 .expect("failed to build a worker runtime");
             runtime.block_on(exec::run_vus(
-                scenario,
-                vars,
-                secrets,
-                sender,
-                clock,
-                metrics,
-                cancel,
-                base_index,
-                count,
-                deadline,
-                seed,
+                scenario, vars, secrets, sender, clock, metrics, cancel, base_index, count,
+                deadline, seed,
             ));
         }));
         base_index += count;
@@ -270,8 +283,7 @@ pub async fn run_with(
         // the only reason a threshold can end a run early.
         if !scenario.abort_on.is_empty() {
             let results = evaluate_thresholds(&scenario.thresholds, &snapshot, &run_histogram);
-            if let Some(metric) =
-                abort_trigger(&scenario.thresholds, &scenario.abort_on, &results)
+            if let Some(metric) = abort_trigger(&scenario.thresholds, &scenario.abort_on, &results)
             {
                 stop_reason = Some(StopReason::Threshold {
                     metric: metric.name().to_string(),
@@ -292,7 +304,11 @@ pub async fn run_with(
 
     let duration = config.clock.now().saturating_duration_since(started_at);
     // A stopped run has no virtual users in flight; saying otherwise would overstate it.
-    let active_vus = if stop_reason.is_some() { 0 } else { scenario.vus };
+    let active_vus = if stop_reason.is_some() {
+        0
+    } else {
+        scenario.vus
+    };
     flush(&per_worker, &mut run_histogram, &mut recorder, active_vus)?;
 
     // Build the final report from one last snapshot, so counters and latency are the
@@ -357,8 +373,9 @@ async fn join_workers(handles: Vec<std::thread::JoinHandle<()>>) -> Result<(), L
 ///
 /// The window is measured with the **real** clock, not the run's [`Clock`]: it is a bound
 /// on how long a human waits, not a measurement, and it must not be affected by the
-/// virtual time a test injects. (A request timeout in `lev-http` is what would let the
-/// in-flight case be bounded by the run itself; that is a later slice.)
+/// virtual time a test injects. (The request timeout in `lev-http` is what bounds the
+/// in-flight case now: the deadline cuts the send off, the VU returns, and the drain
+/// only ever waits for a request that is already timing out.)
 async fn drain_workers(handles: Vec<std::thread::JoinHandle<()>>, window: Duration) {
     let deadline = std::time::Instant::now() + window;
     for handle in handles {
