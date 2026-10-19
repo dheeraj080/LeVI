@@ -260,6 +260,46 @@ fn thresholds_and_abort_rules_parse_into_the_domain() {
 }
 
 #[test]
+fn a_bytes_body_round_trips_as_base64() {
+    use lev_core::Body;
+
+    let format = Yaml;
+    let source = "id: up\nname: Up\nmethod: POST\nurl: /upload\nbody:\n  bytes:\n    contentType: image/png\n    base64: iVBORw0KGgo=\n";
+    let request = format.request_from_str(source).unwrap();
+
+    let Body::Bytes {
+        content_type,
+        content,
+    } = &request.body
+    else {
+        panic!("expected a bytes body, got {:?}", request.body);
+    };
+    assert_eq!(content_type.as_deref(), Some("image/png"));
+    assert_eq!(content, &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+    // Rendering spells the same bytes the same way, so a saved document is stable.
+    let rendered = format.request_to_string(&request).unwrap();
+    assert!(rendered.contains("base64: iVBORw0KGgo="), "{rendered}");
+    assert_eq!(
+        format.request_from_str(&rendered).unwrap().body,
+        request.body
+    );
+}
+
+#[test]
+fn a_file_body_survives_a_round_trip_unresolved() {
+    // The loader resolves a `file` body to bytes; the *document* keeps the reference,
+    // so rendering a parsed collection returns what the author wrote.
+    let format = Yaml;
+    let source = "id: up\nname: Up\nmethod: POST\nurl: /upload\nbody:\n  file: fixtures/logo.png\n";
+    let request = format.request_from_str(source).unwrap();
+
+    assert!(matches!(request.body, lev_core::Body::File(_)));
+    let rendered = format.request_to_string(&request).unwrap();
+    assert!(rendered.contains("file: fixtures/logo.png"), "{rendered}");
+}
+
+#[test]
 fn timeouts_parse_into_the_domain_and_round_trip() {
     let format = Yaml;
 

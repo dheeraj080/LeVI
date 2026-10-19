@@ -10,6 +10,7 @@
 
 pub mod assert;
 pub mod context;
+pub mod encoding;
 pub mod error;
 pub mod model;
 pub mod prepare;
@@ -21,6 +22,7 @@ pub mod threshold;
 
 pub use assert::{Assertion, Check};
 pub use context::Context;
+pub use encoding::{base64_decode, base64_encode};
 pub use error::{CoreError, Result};
 pub use model::{
     ApiKeyLocation, Auth, Body, Collection, Id, Method, RequestDef, Scripts, VarSet, VarValue,

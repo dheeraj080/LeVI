@@ -24,6 +24,9 @@ pub enum FormatError {
     #[error("invalid scenario: {0}")]
     InvalidScenario(String),
 
+    #[error("invalid file body: {0}")]
+    InvalidFileBody(String),
+
     #[error(transparent)]
     Core(#[from] lev_core::CoreError),
 }

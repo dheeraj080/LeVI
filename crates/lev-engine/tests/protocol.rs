@@ -11,7 +11,7 @@ use std::time::Duration;
 use lev_core::{MapSecretStore, Redactor};
 use lev_engine::{in_process_client, Client, Engine, EngineError};
 use lev_protocol::{
-    in_process_channel, Capability, EnvDto, ErrorCode, LogLevel, Message, NdjsonTransport,
+    in_process_channel, BodyDto, Capability, EnvDto, ErrorCode, LogLevel, Message, NdjsonTransport,
     RequestDto, Transport, VarValueDto, Version,
 };
 use serde_json::json;
@@ -408,6 +408,54 @@ async fn a_closed_transport_is_an_engine_error() {
 
     let result = Client::connect(client_end, vec![Capability::Interactive]).await;
     assert!(matches!(result, Err(EngineError::Transport(_))));
+}
+
+#[tokio::test]
+async fn a_binary_body_reaches_the_target_unaltered() {
+    // The engine never opens a file: the bytes arrive base64 on the wire (protocol
+    // v0.3 `bytes` body) and must be sent exactly as the file held them.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .respond_with(ResponseTemplate::new(201).set_body_string("{}"))
+        .mount(&server)
+        .await;
+
+    let engine = engine_with_secret("token", "s3cr3t-token");
+    let (mut client, handle) = in_process_client(engine, 8).await.expect("connect");
+
+    let png = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+    let mut request = get_request(format!("{}/upload", server.uri()));
+    request.method = "POST".to_string();
+    request.body = Some(BodyDto::Bytes {
+        content_type: Some("image/png".to_string()),
+        base64: lev_core::base64_encode(&png),
+    });
+
+    let outcome = client
+        .send_request(request, bearer_env("token", None))
+        .await
+        .expect("upload");
+    assert_eq!(outcome.response.status, 201);
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("requests are recorded");
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body, png.to_vec(), "body was not byte-exact");
+    assert_eq!(
+        received[0]
+            .headers
+            .get("content-type")
+            .map(|value| value.to_str().unwrap()),
+        Some("image/png"),
+        "the body's content type did not become a header"
+    );
+
+    client.stop(true).await.expect("stop");
+    drop(client);
+    handle.await.expect("join").expect("serve");
 }
 
 #[tokio::test]

@@ -98,6 +98,20 @@ pub enum BodyDto {
     File {
         path: String,
     },
+    /// A binary body, carried base64 so the engine needs no filesystem access.
+    ///
+    /// The CLI resolves a `file` body to one of these before sending, so a remote or
+    /// sandboxed engine never opens a path itself. A later agent that confines paths
+    /// to a root of its own can resolve `file` directly.
+    Bytes {
+        #[serde(
+            rename = "contentType",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        content_type: Option<String>,
+        base64: String,
+    },
 }
 
 /// The two JavaScript hooks, carried to the engine as source text.
@@ -298,6 +312,21 @@ mod tests {
         };
         let json = serde_json::to_string(&raw).unwrap();
         assert!(json.contains("\"contentType\":\"text/plain\""), "{json}");
+    }
+
+    #[test]
+    fn a_binary_body_crosses_the_wire_as_base64() {
+        // The engine has no filesystem access, so a body read from a file arrives as
+        // bytes. Base64 is lossless and the content type rides along, or a target
+        // could not tell a PNG from a blob.
+        let body = BodyDto::Bytes {
+            content_type: Some("image/png".to_string()),
+            base64: "iVBORw0KGgo=".to_string(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"kind\":\"bytes\""), "{json}");
+        assert!(json.contains("\"contentType\":\"image/png\""), "{json}");
+        assert_eq!(serde_json::from_str::<BodyDto>(&json).unwrap(), body);
     }
 
     #[test]

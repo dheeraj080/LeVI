@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use lev_core::{
-    ApiKeyLocation, Assertion, Auth, Body, Check, Collection, Method, PreparedRequest, Redactor,
-    RequestDef, Scripts, SecretName, Template, VarSet, VarValue,
+    base64_decode, base64_encode, ApiKeyLocation, Assertion, Auth, Body, Check, Collection, Method,
+    PreparedRequest, Redactor, RequestDef, Scripts, SecretName, Template, VarSet, VarValue,
 };
 use lev_http::{Response, Timings};
 use lev_protocol::{
@@ -317,6 +317,13 @@ fn body_from_dto(dto: Option<BodyDto>) -> Result<Body, EngineError> {
             content,
         },
         Some(BodyDto::File { path }) => Body::File(parse_template(&path)?),
+        Some(BodyDto::Bytes {
+            content_type,
+            base64,
+        }) => Body::Bytes {
+            content_type,
+            content: base64_decode(&base64)?,
+        },
     })
 }
 
@@ -344,6 +351,13 @@ fn body_to_dto(body: &Body) -> Option<BodyDto> {
         }),
         Body::File(template) => Some(BodyDto::File {
             path: template.source().to_string(),
+        }),
+        Body::Bytes {
+            content_type,
+            content,
+        } => Some(BodyDto::Bytes {
+            content_type: content_type.clone(),
+            base64: base64_encode(content),
         }),
     }
 }

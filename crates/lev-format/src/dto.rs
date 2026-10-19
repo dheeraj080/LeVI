@@ -80,6 +80,28 @@ pub struct RawBodyDto {
     pub content: String,
 }
 
+/// The fields of a `bytes` body: binary content, written as base64.
+///
+/// ```yaml
+/// body:
+///   bytes:
+///     contentType: image/png
+///     base64: iVBORw0KGgo=
+/// ```
+///
+/// This is how a body read from a `file` is spelled once it has been resolved: the
+/// loader swaps the reference for the bytes it read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BytesBodyDto {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "contentType"
+    )]
+    pub content_type: Option<String>,
+    pub base64: String,
+}
+
 /// Request body.
 ///
 /// Untagged, single-key form — the natural, git-friendly shape:
@@ -98,6 +120,7 @@ pub enum BodyDto {
     Form { form: Vec<FormFieldDto> },
     Raw { raw: RawBodyDto },
     File { file: String },
+    Bytes { bytes: BytesBodyDto },
 }
 
 /// The two JavaScript hooks, authored as block scalars.

@@ -66,6 +66,10 @@ enum CompiledBody {
         content: Template,
     },
     File(Template),
+    Bytes {
+        content_type: Option<String>,
+        content: Vec<u8>,
+    },
 }
 
 /// Auth with its templates parsed. The `VarValue` fields are resolved at render time
@@ -182,6 +186,13 @@ fn compile_body(body: &Body) -> Result<CompiledBody> {
             content: Template::parse(content)?,
         },
         Body::File(template) => CompiledBody::File(template.clone()),
+        Body::Bytes {
+            content_type,
+            content,
+        } => CompiledBody::Bytes {
+            content_type: content_type.clone(),
+            content: content.clone(),
+        },
     })
 }
 
@@ -233,9 +244,14 @@ impl CompiledBody {
             CompiledBody::File(template) => {
                 let reference = template.render(ctx)?;
                 Err(CoreError::UnsupportedBody(format!(
-                    "file body `{reference}` must be resolved by a layer that can do I/O"
+                    "file body `{reference}` was never resolved: a loader that can do \
+                     I/O (`lev-format::resolve_body_files`) must read it into bytes first"
                 )))
             }
+            CompiledBody::Bytes {
+                content_type,
+                content,
+            } => Ok((content.clone(), content_type.clone())),
         }
     }
 }
@@ -500,6 +516,35 @@ mod tests {
         ]);
         let prepared = prepare_request(&collection(None), &req, vars(&[]), &store).unwrap();
         assert_eq!(prepared.body, b"user=a+b&pw=p%26q");
+    }
+
+    #[test]
+    fn a_bytes_body_is_carried_verbatim() {
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/upload");
+        req.method = Method::Post;
+        req.body = Body::Bytes {
+            content_type: Some("image/png".to_string()),
+            // Deliberately not valid UTF-8: a file's bytes must never be mangled by a
+            // lossy trip through a string.
+            content: vec![0x89, 0x50, 0x4e, 0x47, 0xff, 0x00],
+        };
+        let prepared = prepare_request(&collection(None), &req, vars(&[]), &store).unwrap();
+        assert_eq!(prepared.body, vec![0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+        assert_eq!(header(&prepared.headers, "content-type"), Some("image/png"));
+    }
+
+    #[test]
+    fn an_unresolved_file_body_says_so() {
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/upload");
+        req.method = Method::Post;
+        req.body = Body::File(Template::parse("fixtures/logo.png").unwrap());
+        let error = prepare_request(&collection(None), &req, vars(&[]), &store)
+            .expect_err("must not guess");
+        let message = error.to_string();
+        assert!(message.contains("never resolved"), "{message}");
+        assert!(message.contains("fixtures/logo.png"), "{message}");
     }
 
     #[test]

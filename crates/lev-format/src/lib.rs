@@ -10,6 +10,7 @@
 mod convert;
 pub mod dto;
 pub mod error;
+mod files;
 mod yaml;
 
 use std::path::Path;
@@ -18,6 +19,7 @@ use lev_core::{Collection, RequestDef, Scenario, VarSet};
 
 pub use convert::{format_duration, parse_duration};
 pub use error::FormatError;
+pub use files::{resolve_body_files, MAX_BODY_FILE_BYTES};
 pub use yaml::Yaml;
 
 /// A concrete on-disk representation (YAML today; anything later).

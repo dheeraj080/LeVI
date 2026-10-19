@@ -25,6 +25,9 @@ pub enum CoreError {
     #[error("unsupported body: {0}")]
     UnsupportedBody(String),
 
+    #[error("invalid base64: {0}")]
+    InvalidBase64(String),
+
     #[error("invalid threshold: {0}")]
     InvalidThreshold(String),
 }

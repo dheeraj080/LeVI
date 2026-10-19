@@ -288,8 +288,16 @@ exists. The envelope is already designed to carry them.
 | Field | Direction | Meaning |
 |---|---|---|
 | `sendRequest.request.timeoutMs` | client -> engine | overall deadline in ms; absent = engine default, never unbounded |
+| `sendRequest.request.body` | client -> engine | gains the `bytes` kind: `{ "kind": "bytes", "contentType"?, "base64" }` |
 
 `PROTOCOL_VERSION` is `0.3`. A deadline that expires is reported as `error` with
 `code: "engine"` (the target failed to answer, not the request definition) — no new
 error code was introduced. Engines that predate v0.3 ignore the field and apply their
 own default, which is still bounded.
+
+The `bytes` body kind is additive: a body read from a file travels base64, so the
+engine needs no filesystem access. The *client* opens the file — it is the side that
+knows the collection, and the side a user is watching — so an engine can run where no
+collection is checked out. The `file` kind stays in the protocol for a later agent that
+can confine paths to a root of its own; until then a `file` body that reaches an engine
+is refused, because the engine cannot tell a fixture from `/etc/passwd`.

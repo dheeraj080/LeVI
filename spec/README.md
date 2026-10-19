@@ -56,6 +56,37 @@ assertions:
   - jsonPath: { path: id, equals: "{{order_id}}" }
 ```
 
+## Bodies
+
+`body:` takes exactly one of these keys:
+
+| Key | Meaning |
+|---|---|
+| `json` | JSON source text, templated, sent as `application/json` |
+| `form` | `application/x-www-form-urlencoded` fields |
+| `raw` | literal text with an optional `contentType` |
+| `file` | a path, read once **relative to the collection directory**, sent byte-for-byte |
+| `bytes` | content written as base64, for a fixture too small to keep in its own file |
+
+```yaml
+body:
+  file: fixtures/logo.png
+```
+
+A `file` path must stay inside the collection — no absolute paths and no `..` — because
+a request file is text in a repository, often from a pull request, and opening it must
+not be enough to read `../../.ssh/id_rsa`. The content type comes from the extension;
+an explicit `Content-Type` header always wins. Files are read once, when the collection
+is loaded, so a missing fixture fails `levi validate` and `levi request` rather than
+surfacing mid-run.
+
+```yaml
+body:
+  bytes:
+    contentType: image/png
+    base64: iVBORw0KGgo=
+```
+
 ## Templates
 
 - `{{ name }}` resolves a variable (precedence: global < collection < environment <

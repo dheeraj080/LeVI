@@ -20,7 +20,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lev_core::{Collection, CoreError, Id, RequestDef};
 use lev_engine::{convert, in_process_client, store_from_env, Engine, EngineError, RequestOutcome};
-use lev_format::{load_collection, load_request, load_scenario, load_vars, FormatError, Yaml};
+use lev_format::{
+    load_collection, load_request, load_scenario, load_vars, resolve_body_files, FormatError, Yaml,
+};
 use lev_load::{CompiledScenario, JsonReporter, LoadError, Reporter, RunConfig};
 use lev_metrics::{RunId, RunReport, StopReason, ThresholdResult, ThresholdUnit};
 use lev_protocol::{EchoDto, ErrorCode, NdjsonTransport, ResponseDto, TimingsDto};
@@ -218,18 +220,21 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
     let options = RequestOptions::parse(args)?;
     let format = Yaml;
 
-    let mut request = load_request(&format, &options.file)?;
+    let base_dir = options
+        .collection
+        .clone()
+        .unwrap_or_else(|| discover_collection_dir(&options.file));
+
+    // A `file:` body is read *now*, relative to the collection, so the engine is
+    // handed bytes and never opens a path of its own.
+    let mut request = load_and_resolve(&format, &options.file, &base_dir)?;
+
     // Precedence: `--timeout` (the flag wins) > the request's own `timeout:` > the
     // run/scenario default > the transport default. The override is applied here,
     // where files are loaded, so every layer below sees one resolved deadline.
     if let Some(timeout) = options.timeout {
         request.timeout = Some(timeout);
     }
-
-    let base_dir = options
-        .collection
-        .clone()
-        .unwrap_or_else(|| discover_collection_dir(&options.file));
     let collection_path = base_dir.join("collection.yaml");
     let collection = if collection_path.is_file() {
         load_collection(&format, &collection_path)?
@@ -302,7 +307,7 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
     };
 
     // Every request in the collection is a candidate step target.
-    let mut requests = load_requests(&format, &base_dir.join("requests"))?;
+    let mut requests = load_requests(&format, &base_dir)?;
     if requests.is_empty() {
         return Err(Fail::config(format!(
             "no requests found under `{}`",
@@ -394,11 +399,25 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
     }
 }
 
-/// Load every `requests/*.yaml` into an id-keyed map; duplicate ids are an error.
-fn load_requests(format: &Yaml, dir: &Path) -> Result<BTreeMap<Id, RequestDef>, Fail> {
+/// Load one request file and resolve its `file:` bodies against the collection root.
+///
+/// A `file:` body is part of the collection: a missing, escaping or oversized fixture
+/// is an error wherever a request is loaded, never a surprise mid-run.
+fn load_and_resolve(format: &Yaml, path: &Path, root: &Path) -> Result<RequestDef, FormatError> {
+    let mut request = load_request(format, path)?;
+    resolve_body_files(root, &mut request)?;
+    Ok(request)
+}
+
+/// Load every `requests/*.yaml` under the collection rooted at `root` into an
+/// id-keyed map; duplicate ids are an error.
+///
+/// `file:` bodies are read here, relative to `root`, so the load path and the engine
+/// both receive bytes.
+fn load_requests(format: &Yaml, root: &Path) -> Result<BTreeMap<Id, RequestDef>, Fail> {
     let mut requests: BTreeMap<Id, RequestDef> = BTreeMap::new();
-    for path in yaml_files(dir)? {
-        let request = load_request(format, &path)?;
+    for path in yaml_files(&root.join("requests"))? {
+        let request = load_and_resolve(format, &path, root)?;
         if requests.insert(request.id.clone(), request).is_some() {
             return Err(Fail::config(format!(
                 "duplicate request id in `{}`",
@@ -584,7 +603,7 @@ fn run_validate(args: &[String]) -> Result<(), Fail> {
         check(&path, load_vars(&format, &path).map(|_| ()));
     }
     for path in yaml_files(&dir.join("requests"))? {
-        check(&path, load_request(&format, &path).map(|_| ()));
+        check(&path, load_and_resolve(&format, &path, &dir).map(|_| ()));
     }
 
     if checked == 0 {

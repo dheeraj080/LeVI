@@ -5,14 +5,15 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use lev_core::{
-    ApiKeyLocation, Assertion, Auth, Body, Collection, Executor, Method, RequestDef, Scenario,
-    Scripts, SecretName, Step, Template, Threshold, ThresholdMetric, VarSet, VarValue,
+    base64_decode, base64_encode, ApiKeyLocation, Assertion, Auth, Body, Collection, Executor,
+    Method, RequestDef, Scenario, Scripts, SecretName, Step, Template, Threshold, ThresholdMetric,
+    VarSet, VarValue,
 };
 
 use crate::dto::{
-    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CollectionDto, ConstantVusDto, DurationDto,
-    ExecutorDto, FormFieldDto, HeaderAssertionDto, HeaderDto, JsonPathAssertionDto, RawBodyDto,
-    RequestDto, ScenarioDto, ScriptsDto, StepDto, VarValueDto,
+    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, BytesBodyDto, CollectionDto, ConstantVusDto,
+    DurationDto, ExecutorDto, FormFieldDto, HeaderAssertionDto, HeaderDto, JsonPathAssertionDto,
+    RawBodyDto, RequestDto, ScenarioDto, ScriptsDto, StepDto, VarValueDto,
 };
 use crate::error::FormatError;
 
@@ -236,6 +237,10 @@ fn body_to_core(dto: Option<BodyDto>) -> Result<Body, FormatError> {
             content: raw.content,
         },
         Some(BodyDto::File { file }) => Body::File(Template::parse(&file)?),
+        Some(BodyDto::Bytes { bytes }) => Body::Bytes {
+            content_type: bytes.content_type,
+            content: base64_decode(&bytes.base64)?,
+        },
     })
 }
 
@@ -265,6 +270,15 @@ fn body_from_core(body: &Body) -> Option<BodyDto> {
         }),
         Body::File(template) => Some(BodyDto::File {
             file: template.source().to_string(),
+        }),
+        Body::Bytes {
+            content_type,
+            content,
+        } => Some(BodyDto::Bytes {
+            bytes: BytesBodyDto {
+                content_type: content_type.clone(),
+                base64: base64_encode(content),
+            },
         }),
     }
 }

@@ -129,9 +129,16 @@ pub enum Body {
         content_type: Option<String>,
         content: String,
     },
-    /// A body read from a file at send time. Requires I/O, so resolution lives
-    /// outside `lev-core`; carrying the reference here keeps the model complete.
+    /// A body read from a file. `lev-core` is pure, so the reference is resolved by a
+    /// loader that can do I/O (`lev-format`), which replaces it with [`Body::Bytes`]
+    /// before the request reaches an engine.
     File(Template),
+    /// Bytes, already read from a file (or authored inline as base64) and carried
+    /// verbatim. Nothing here is templated: a file is a file.
+    Bytes {
+        content_type: Option<String>,
+        content: Vec<u8>,
+    },
 }
 
 /// Pre- and post-request scripts.
