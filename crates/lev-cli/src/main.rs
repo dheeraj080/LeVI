@@ -107,6 +107,11 @@ evaluated on the run's numbers and printed in the report; a threshold that fails
 1. A metric listed in `abortOn` stops the run as soon as its threshold fails, and
 Ctrl-C stops it gracefully with a partial report. Scripts and assertions are not yet
 evaluated under load.
+
+Requests are bounded: a send is cut off at its `timeout:` (or the run/flag default), so
+a target that stops answering costs one iteration instead of hanging the tool.
+`levi serve --stdio` stops gracefully on Ctrl-C or SIGTERM — the request in flight is
+answered, then the engine reports why it stopped and exits 0.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -507,8 +512,36 @@ async fn run_serve(args: &[String]) -> Result<(), Fail> {
     }
 
     let engine = Engine::from_store(store_from_env())?;
-    engine.serve(NdjsonTransport::stdio()).await?;
+    // Ctrl-C (and SIGTERM on unix) stops the session *gracefully*: the request in
+    // flight finishes and its result is delivered, then the engine says why it
+    // stopped and exits 0. Being killed mid-response would look like a crash.
+    engine
+        .serve_with_shutdown(NdjsonTransport::stdio(), shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// Resolve when the process is asked to stop.
+///
+/// Ctrl-C everywhere, plus SIGTERM on unix — what a supervisor (systemd, Docker)
+/// sends before it resorts to SIGKILL.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let Ok(mut term) = signal(SignalKind::terminate()) else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 // ---- validate ----

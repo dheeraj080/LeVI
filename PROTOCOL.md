@@ -193,6 +193,24 @@ instrumented connector lands.
 { "type": "stop", "graceful": true }
 ```
 
+The session ends after the message in flight — if any — has been answered. The engine
+never truncates a `requestResult`, so a client that stops a run still receives the last
+reply. Because the engine dispatches one message at a time, a `stop` can only arrive
+between dispatches, and `graceful: false` therefore has nothing extra to cut short; the
+flag is recorded in the shutdown `log` below so the distinction stays visible on the
+wire.
+
+A session that is ending sends a final `log` before the stream closes, so the client
+learns *why* it ended instead of just seeing a closed pipe:
+
+```json
+{ "type": "log", "level": "info", "msg": "engine stopping: signal" }
+```
+
+The cause is `signal` (the host process was asked to stop), `stop`, or
+`stop (ungraceful)`. The message is best-effort: if the peer is already gone the send
+is dropped, and a failed send never turns a clean stop into an error.
+
 ### `log` / `error`
 
 ```json

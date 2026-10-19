@@ -11,8 +11,8 @@ use std::time::Duration;
 use lev_core::{MapSecretStore, Redactor};
 use lev_engine::{in_process_client, Client, Engine, EngineError};
 use lev_protocol::{
-    in_process_channel, Capability, EnvDto, ErrorCode, Message, NdjsonTransport, RequestDto,
-    Transport, VarValueDto, Version,
+    in_process_channel, Capability, EnvDto, ErrorCode, LogLevel, Message, NdjsonTransport,
+    RequestDto, Transport, VarValueDto, Version,
 };
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
@@ -408,4 +408,84 @@ async fn a_closed_transport_is_an_engine_error() {
 
     let result = Client::connect(client_end, vec![Capability::Interactive]).await;
     assert!(matches!(result, Err(EngineError::Transport(_))));
+}
+
+#[tokio::test]
+async fn a_shutdown_signal_ends_the_session_cleanly_and_says_why() {
+    let (client_end, engine_end) = in_process_channel(8);
+    let (shutdown, wait) = tokio::sync::oneshot::channel::<()>();
+
+    let engine = engine_with_secret("token", "x");
+    let handle = tokio::spawn(async move {
+        engine
+            .serve_with_shutdown(engine_end, async move {
+                let _ = wait.await;
+            })
+            .await
+    });
+
+    let mut client = Client::connect(client_end, vec![Capability::Interactive])
+        .await
+        .expect("connect");
+    shutdown.send(()).expect("signal");
+
+    // The engine explains why the stream is ending instead of just closing it.
+    match client.next().await.expect("next") {
+        Some(Message::Log { level, msg }) => {
+            assert_eq!(level, LogLevel::Info);
+            assert!(msg.contains("signal"), "{msg}");
+        }
+        other => panic!("expected a shutdown log, got {other:?}"),
+    }
+
+    handle.await.expect("join").expect("serve");
+}
+
+#[tokio::test]
+async fn a_shutdown_waits_for_the_request_already_in_flight() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/slow"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("{}")
+                .set_delay(Duration::from_millis(500)),
+        )
+        .mount(&server)
+        .await;
+
+    let (client_end, engine_end) = in_process_channel(8);
+    let (shutdown, wait) = tokio::sync::oneshot::channel::<()>();
+
+    let engine = engine_with_secret("token", "s3cr3t-token");
+    let handle = tokio::spawn(async move {
+        engine
+            .serve_with_shutdown(engine_end, async move {
+                let _ = wait.await;
+            })
+            .await
+    });
+
+    let mut client = Client::connect(client_end, vec![Capability::Interactive])
+        .await
+        .expect("connect");
+
+    // Stop the engine while the target is still thinking: graceful means the
+    // request in flight is answered, not truncated.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = shutdown.send(());
+    });
+
+    let outcome = client
+        .send_request(
+            get_request(format!("{}/slow", server.uri())),
+            bearer_env("token", None),
+        )
+        .await
+        .expect("the in-flight request must still be answered");
+
+    assert_eq!(outcome.response.status, 200);
+
+    handle.await.expect("join").expect("serve");
 }

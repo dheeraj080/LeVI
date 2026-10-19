@@ -6,6 +6,7 @@
 //! request run *identical* code — there is no second code path to keep in sync.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use lev_core::{
@@ -13,7 +14,7 @@ use lev_core::{
 };
 use lev_http::HttpClient;
 use lev_protocol::{
-    negotiate, EchoDto, EnvDto, ErrorCode, Message, RequestDto, ResponseDto, Transport,
+    negotiate, EchoDto, EnvDto, ErrorCode, LogLevel, Message, RequestDto, ResponseDto, Transport,
     PROTOCOL_VERSION,
 };
 use lev_script::{
@@ -78,8 +79,40 @@ impl Engine {
     /// Returns `Ok(())` for a clean end of stream, a `Stop`, or a rejected
     /// handshake. A rejected handshake sends exactly one `Error` first, so the peer
     /// learns *why* instead of just seeing a closed pipe.
-    pub async fn serve<T: Transport>(&self, mut transport: T) -> Result<(), EngineError> {
-        let Some(first) = transport.recv().await? else {
+    pub async fn serve<T: Transport>(&self, transport: T) -> Result<(), EngineError> {
+        self.serve_with_shutdown(transport, std::future::pending())
+            .await
+    }
+
+    /// Serve one session until the stream ends, a `stop` arrives, or `shutdown`
+    /// resolves.
+    ///
+    /// `shutdown` is the **graceful** stop: it takes effect between messages, so a
+    /// request already being dispatched runs to completion and its result is
+    /// delivered — a `levi serve --stdio` stopped by Ctrl-C never truncates an
+    /// in-flight response. Nothing new is accepted after it resolves.
+    ///
+    /// A `stop` message means the same thing, because the loop is sequential: by the
+    /// time one is read there is no work in flight to abandon, so `graceful: false`
+    /// has nothing extra to cut short. The flag is echoed in the shutdown log so the
+    /// distinction stays visible on the wire.
+    pub async fn serve_with_shutdown<T, S>(
+        &self,
+        mut transport: T,
+        shutdown: S,
+    ) -> Result<(), EngineError>
+    where
+        T: Transport,
+        S: Future<Output = ()>,
+    {
+        tokio::pin!(shutdown);
+
+        let first = tokio::select! {
+            biased;
+            () = &mut shutdown => return Ok(()),
+            next = transport.recv() => next?,
+        };
+        let Some(first) = first else {
             return Ok(());
         };
 
@@ -120,7 +153,15 @@ impl Engine {
             .await?;
 
         loop {
-            let Some(message) = transport.recv().await? else {
+            let message = tokio::select! {
+                biased;
+                () = &mut shutdown => {
+                    self.note_shutdown(&mut transport, "signal").await;
+                    return Ok(());
+                }
+                next = transport.recv() => next?,
+            };
+            let Some(message) = message else {
                 return Ok(());
             };
             match message {
@@ -136,7 +177,15 @@ impl Engine {
                     };
                     transport.send(reply).await?;
                 }
-                Message::Stop { .. } => return Ok(()),
+                Message::Stop { graceful } => {
+                    let cause = if graceful {
+                        "stop"
+                    } else {
+                        "stop (ungraceful)"
+                    };
+                    self.note_shutdown(&mut transport, cause).await;
+                    return Ok(());
+                }
                 Message::Hello { .. } => {
                     transport
                         .send(Message::error(
@@ -158,6 +207,19 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Tell the peer why the session is ending, best-effort.
+    ///
+    /// The pipe may already be gone (the parent exited, the client closed it); a
+    /// failed send must not turn a clean stop into an error.
+    async fn note_shutdown<T: Transport>(&self, transport: &mut T, cause: &str) {
+        let _ = transport
+            .send(Message::Log {
+                level: LogLevel::Info,
+                msg: format!("engine stopping: {cause}"),
+            })
+            .await;
     }
 
     /// Resolve, run the hooks, send, then evaluate assertions — everything redacted.
