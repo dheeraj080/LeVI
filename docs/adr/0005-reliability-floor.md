@@ -153,9 +153,30 @@ And a transport failure is logged as a fixed classification rather than as the e
 own message, because a message can carry the URL and a URL can carry a token — a log line
 must never be a way around the redaction the engine does.
 
+### 7. Secrets come from the environment, then the keychain, and redaction follows them
+
+The spec says a `secret:` reference is resolved from the OS keychain and never stored;
+until now only `LEVI_SECRET_*` existed, which made the spec wrong. Both exist now, in a
+fixed order: the environment first, the keychain second. That order keeps every existing
+`LEVI_SECRET_*` working, keeps CI (which has no keychain) on the fast path, and means a
+keychain failure can only break a command that actually references a keychain-only
+secret — never every command.
+
+The part that took design was redaction. The redactor is built from values known up
+front, and a keychain has no "list" to build anything from — so the store reports each
+value the first time it resolves it, and the engine folds it into the redactor *before*
+the request is echoed. Values are resolved once per process and cached after that: a
+load run must not become a keychain round-trip per request, and "resolved once per run"
+is also what ADR 0001 promised.
+
+What is deliberately absent: `levi secret list` (credential stores cannot enumerate
+reliably, and one that could would leak which names exist) and `levi secret get`
+(printing a secret is what a keychain exists to prevent). The value for
+`levi secret set` comes from stdin, never from an argument — an argument lands in the
+shell history and in `ps` output.
+
 ## Deferred, on the record
 
-- **OS keychain secrets**: secrets come from `LEVI_SECRET_*` environment variables only.
 - **`serve`-wide defaults** (`levi serve` has no `--timeout`/`--retries` of its own): a
   serve-wide default belongs in `levi.toml` with the rest of the project config, not in
   a second flag with different precedence rules.

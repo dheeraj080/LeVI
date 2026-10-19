@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The `levi` command-line interface.
 //!
-//! Surface: `request`, `run`, `serve --stdio` and `validate`. `request` runs the
-//! **real protocol path** — it sends a `SendRequest` to an engine over an in-process
-//! transport, rather than calling the transport directly. There is no shortcut here
-//! on purpose: if the protocol is wrong, the CLI breaks first.
+//! Surface: `request`, `run`, `secret`, `serve --stdio` and `validate`. `request` runs
+//! the **real protocol path** — it sends a `SendRequest` to an engine over an
+//! in-process transport, rather than calling the transport directly. There is no
+//! shortcut here on purpose: if the protocol is wrong, the CLI breaks first.
 //!
 //! `run` is the load path: it compiles a scenario against a collection and drives it
 //! through `lev-load`, then prints a summary and (optionally) writes a JSON report.
@@ -19,7 +19,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lev_core::{Collection, CoreError, Id, RequestDef};
-use lev_engine::{convert, in_process_client, store_from_env, Engine, EngineError, RequestOutcome};
+use lev_engine::{
+    convert, in_process_client, keychain_delete, keychain_set, store_from_env, Engine, EngineError,
+    RequestOutcome,
+};
 use lev_format::{
     load_collection, load_request, load_scenario, load_vars, resolve_body_files, FormatError, Yaml,
 };
@@ -97,6 +100,8 @@ USAGE:
 COMMANDS:
     request <file>       Send one request and print the response
     run <scenario>       Run a load scenario and print a report
+    secret set <name>    Store a secret in the OS keychain (value read from stdin)
+    secret delete <name> Remove a secret from the OS keychain
     serve --stdio        Serve the protocol over stdin/stdout (NDJSON)
     validate <dir>       Parse a collection directory and report errors
     help                 Print this help
@@ -140,9 +145,12 @@ LOGGING:
     `serve`'s NDJSON channel. Set LEVI_LOG to a filter such as `info`, `debug` or
     `lev_http=debug` (RUST_LOG works too) [default: warn]
 
-Secrets are read from environment variables named LEVI_SECRET_<NAME>. The engine
-redacts secret values before anything is printed or crosses the protocol. Pre- and
-post-request scripts run in a sandbox with a CPU budget and a memory limit; checks
+Secrets are read from environment variables named LEVI_SECRET_<NAME>, and from the OS
+keychain (Windows Credential Manager, the macOS keychain, the platform secret service)
+for any name the environment does not have. `levi secret set <name>` stores one — the
+value is read from stdin, so it never lands in your shell history or in a file. The
+engine redacts secret values before anything is printed or crosses the protocol. Pre-
+and post-request scripts run in a sandbox with a CPU budget and a memory limit; checks
 from `lev.test(...)` and from `assertions:` are reported and set the exit code.
 
 `levi run` drives the closed (constant-VU) executor. A scenario's `thresholds` are
@@ -242,6 +250,7 @@ async fn run(args: &[String]) -> Result<(), Fail> {
     match command.as_str() {
         "request" => run_request(&args[1..]).await,
         "run" => run_load(&args[1..]).await,
+        "secret" => run_secret(&args[1..]),
         "serve" => run_serve(&args[1..]).await,
         "validate" => run_validate(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -313,8 +322,8 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
             "--retry-non-idempotent does nothing without --retries",
         ));
     }
-    let engine = Engine::from_store(store_from_env())?
-        .with_retries(options.retries, options.retry_non_idempotent)?;
+    let engine =
+        Engine::with_os_secrets()?.with_retries(options.retries, options.retry_non_idempotent)?;
     let (mut client, handle) = in_process_client(engine, 8).await?;
 
     let outcome = client.send_request(request_dto, env_dto).await?;
@@ -588,7 +597,7 @@ async fn run_serve(args: &[String]) -> Result<(), Fail> {
         ));
     }
 
-    let engine = Engine::from_store(store_from_env())?;
+    let engine = Engine::with_os_secrets()?;
     // Ctrl-C (and SIGTERM on unix) stops the session *gracefully*: the request in
     // flight finishes and its result is delivered, then the engine says why it
     // stopped and exits 0. Being killed mid-response would look like a crash.
@@ -699,6 +708,72 @@ fn yaml_files(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
         .collect();
     paths.sort();
     Ok(paths)
+}
+
+// ---- secret ----
+
+/// `levi secret set|delete`: the OS keychain half of secret handling.
+///
+/// There is no `secret list`, and there cannot be: credential stores do not offer a
+/// reliable enumeration, and one that did would tell anybody which names are in use.
+/// There is no `secret get` either, because printing a secret is exactly what a
+/// keychain exists to prevent.
+fn run_secret(args: &[String]) -> Result<(), Fail> {
+    let usage = "usage: levi secret set <name> | levi secret delete <name>";
+    let Some(action) = args.first() else {
+        return Err(Fail::config(usage));
+    };
+    let Some(name) = args.get(1) else {
+        return Err(Fail::config(usage));
+    };
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return Err(Fail::config(
+            "a secret name is one word — no spaces, nothing to quote",
+        ));
+    }
+
+    match action.as_str() {
+        "set" => {
+            let value = read_secret_from_stdin()?;
+            keychain_set(name, &value).map_err(|error| Fail::engine(error.to_string()))?;
+            eprintln!("stored `{name}` in the OS keychain");
+            Ok(())
+        }
+        "delete" => {
+            keychain_delete(name).map_err(|error| Fail::engine(error.to_string()))?;
+            eprintln!("removed `{name}` from the OS keychain");
+            Ok(())
+        }
+        other => Err(Fail::config(format!(
+            "unknown secret action `{other}`\n{usage}"
+        ))),
+    }
+}
+
+/// The value to store, read from stdin — never from an argument.
+///
+/// An argument would sit in the shell history, in `ps` output, and in this process's
+/// own `argv`; stdin is the one place that is none of those. A single trailing
+/// newline (or CRLF, on Windows) is stripped, because that is the shell's line
+/// ending rather than part of the secret.
+fn read_secret_from_stdin() -> Result<String, Fail> {
+    use std::io::{IsTerminal, Read};
+
+    if std::io::stdin().is_terminal() {
+        eprintln!(
+            "reading the value from stdin — paste it, then Ctrl-D (Ctrl-Z, Enter on Windows)"
+        );
+    }
+    let mut buffer = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buffer)
+        .map_err(|error| Fail::engine(format!("could not read the value from stdin: {error}")))?;
+    let value = buffer.strip_suffix('\n').unwrap_or(&buffer);
+    let value = value.strip_suffix('\r').unwrap_or(value);
+    if value.is_empty() {
+        return Err(Fail::config("empty value on stdin — nothing to store"));
+    }
+    Ok(value.to_string())
 }
 
 // ---- output ----

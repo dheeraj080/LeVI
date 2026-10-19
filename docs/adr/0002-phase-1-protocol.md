@@ -91,6 +91,8 @@ distinction. `sendRequest` never fails on status.
 ## Deferred
 
 - OS-keychain `SecretStore` (secrets still come from `LEVI_SECRET_<NAME>`).
+  **Done later:** the keychain answers names the environment does not have, with the
+  values folded into the redactor as they resolve — see ADR 0005 §7.
 - Instrumented connector timings (`dnsMs` / `connectMs` / `tlsMs` are still absent).
   **Done later:** they are measured at the connector now, and reported only by a
   request that opened a connection — see ADR 0005 §5.

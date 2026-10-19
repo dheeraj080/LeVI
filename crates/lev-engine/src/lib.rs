@@ -7,7 +7,7 @@
 //! - converts `lev-protocol` DTOs to and from `lev-core` types
 //!   ([`convert`] — the protocol crate cannot see `lev-core`, so the compiler stops
 //!   a domain type leaking onto the wire);
-//! - resolves secrets from the environment ([`secrets`]);
+//! - resolves secrets from the environment and the OS keychain ([`secrets`]);
 //! - prepares and sends a request through `lev-http`;
 //! - **redacts before anything crosses the boundary**, so a secret value can never
 //!   reach a client;
@@ -28,7 +28,10 @@ pub mod secrets;
 pub use client::{in_process_client, Client, RequestOutcome};
 pub use engine::{Dispatch, Engine};
 pub use error::EngineError;
-pub use secrets::{redactor_for, store_from_env, SECRET_ENV_PREFIX};
+pub use secrets::{
+    keychain_delete, keychain_set, redactor_for, store_from_env, KeychainStore, ResolvingStore,
+    SECRET_ENV_PREFIX,
+};
 
 /// The engine version reported to clients in the `Ready` handshake.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

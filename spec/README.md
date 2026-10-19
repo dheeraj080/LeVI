@@ -96,7 +96,10 @@ body:
 ## Secrets
 
 A value of the form `{ secret: <name> }` is a reference. The value is resolved from the
-OS keychain at send time, zeroized for the run, and never written to disk or logged.
+`LEVI_SECRET_<NAME>` environment variable, or from the OS keychain (entry `levi/<name>`)
+when the environment does not name it — on first use, cached for the run, zeroized when
+the run ends, and never written to a LeVI file or logged. `levi secret set <name>` stores
+one in the keychain, reading the value from stdin.
 
 ## Scripts
 

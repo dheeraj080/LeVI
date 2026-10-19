@@ -84,6 +84,17 @@ impl std::fmt::Debug for Secret {
 /// read the OS keychain; tests and the CLI use [`MapSecretStore`].
 pub trait SecretStore: Send + Sync {
     fn resolve(&self, name: &SecretName) -> Result<Secret>;
+
+    /// The values resolved since the last call, so the redactor can learn about them.
+    ///
+    /// A store that knows everything it holds up front — [`MapSecretStore`] — has
+    /// nothing to report: whoever built the redactor was handed those values already.
+    /// A store that can only answer per name, because the values live in the OS
+    /// keychain, reports each value here the first time it is resolved. Draining is
+    /// the contract: a value is reported once, and stays registered after that.
+    fn newly_resolved(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// An in-memory secret store.

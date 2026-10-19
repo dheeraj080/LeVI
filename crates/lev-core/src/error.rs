@@ -19,6 +19,13 @@ pub enum CoreError {
     #[error("secret `{0}` not found")]
     SecretNotFound(String),
 
+    /// A store that reads the OS credential store was asked for a secret and the
+    /// store itself could not be read — a locked keychain, no session bus, a denied
+    /// prompt. Distinct from [`CoreError::SecretNotFound`]: nothing here says the
+    /// secret is absent, so a caller should not treat it as a naming mistake.
+    #[error("the OS keychain could not be read for `{name}`: {reason}")]
+    KeychainUnavailable { name: String, reason: String },
+
     #[error("invalid url `{0}`")]
     InvalidUrl(String),
 

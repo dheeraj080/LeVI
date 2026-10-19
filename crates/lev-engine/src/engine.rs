@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lev_core::{
     prepare_request_with_seed, Check, MapSecretStore, Redactor, SecretStore, VarSet, VarValue,
@@ -40,7 +40,10 @@ pub struct Dispatch {
 /// The engine, holding the transport-independent state a session needs.
 pub struct Engine {
     secrets: Arc<dyn SecretStore>,
-    redactor: Redactor,
+    /// Behind a lock because a keychain secret's value cannot be known when the
+    /// engine is built: the keychain has no "list", so the store reports what it
+    /// resolves and [`Engine::redactor`] folds each value in before it can be echoed.
+    redactor: Mutex<Redactor>,
     http: HttpClient,
     scripts: Arc<Sandbox>,
 }
@@ -48,8 +51,10 @@ pub struct Engine {
 impl Engine {
     /// Build an engine with an explicit secret store and redactor.
     ///
-    /// The redactor must cover the same values the store can resolve, or a secret
-    /// could escape in an echo.
+    /// The redactor must cover the values the store can resolve *without being
+    /// asked per name*; a store that cannot report them ahead of time (the OS
+    /// keychain) reports them through [`SecretStore::newly_resolved`] instead, and
+    /// this engine folds those in as they arrive.
     pub fn new(secrets: Arc<dyn SecretStore>, redactor: Redactor) -> Result<Self, EngineError> {
         Self::with_script_limits(secrets, redactor, Limits::default())
     }
@@ -62,16 +67,46 @@ impl Engine {
     ) -> Result<Self, EngineError> {
         Ok(Self {
             secrets,
-            redactor,
+            redactor: Mutex::new(redactor),
             http: HttpClient::new()?,
             scripts: Arc::new(Sandbox::new(limits)?),
         })
     }
 
     /// Build an engine from an in-memory store, deriving the redactor from it.
+    ///
+    /// In-memory only: no OS calls, ever. This is what tests use.
     pub fn from_store(store: MapSecretStore) -> Result<Self, EngineError> {
-        let redactor = crate::secrets::redactor_for(&store);
+        let redactor = crate::secrets::redactor_for(store.values());
+        Self::new(
+            Arc::new(crate::secrets::ResolvingStore::memory(store)),
+            redactor,
+        )
+    }
+
+    /// Build an engine whose secrets come from the environment and the OS keychain.
+    ///
+    /// This is what the CLI uses. The redactor starts with the environment's values
+    /// — all that is knowable without asking the keychain — and every keychain value
+    /// is folded in the moment it is resolved (see [`SecretStore::newly_resolved`]).
+    pub fn with_os_secrets() -> Result<Self, EngineError> {
+        let store = crate::secrets::store_from_env();
+        let redactor = crate::secrets::redactor_for(store.known_values());
         Self::new(Arc::new(store), redactor)
+    }
+
+    /// The redactor, with everything the store resolved since the last look folded in.
+    ///
+    /// A keychain value cannot be known up front — the keychain has no "list" — so
+    /// the store reports what it resolved and this is where that becomes redaction,
+    /// before the request is echoed or any script output is kept. The lock is
+    /// dropped before the next await: it guards bookkeeping, never I/O.
+    fn redactor(&self) -> MutexGuard<'_, Redactor> {
+        let mut redactor = self.redactor.lock().unwrap_or_else(PoisonError::into_inner);
+        for value in self.secrets.newly_resolved() {
+            redactor.add_secret(value);
+        }
+        redactor
     }
 
     /// Replace the transport policy this engine sends with.
@@ -294,8 +329,13 @@ impl Engine {
             logs.extend(outcome.logs);
         }
 
-        // The echo reflects what actually goes out, after any pre-request rewrite.
-        let echo = convert::echo_to_dto(&prepared, &self.redactor);
+        // The echo reflects what actually goes out, after any pre-request rewrite —
+        // and after every secret it may contain is known to the redactor, including
+        // one that only the OS keychain could answer for.
+        let echo = {
+            let redactor = self.redactor();
+            convert::echo_to_dto(&prepared, &redactor)
+        };
         let sent = prepared.clone();
         let response = self.http.send(prepared).await?;
 
@@ -321,14 +361,12 @@ impl Engine {
         // Declarative assertions run against the raw response, after the script.
         checks.extend(checks::evaluate(&request.assertions, &response));
 
+        let redactor = self.redactor();
         Ok(Dispatch {
             echo,
-            response: convert::response_to_dto(&response, &self.redactor),
-            checks: redact_checks(checks, &self.redactor),
-            logs: logs
-                .into_iter()
-                .map(|log| self.redactor.redact(&log))
-                .collect(),
+            response: convert::response_to_dto(&response, &redactor),
+            checks: redact_checks(checks, &redactor),
+            logs: logs.into_iter().map(|log| redactor.redact(&log)).collect(),
         })
     }
 }

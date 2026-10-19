@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lev_core::{MapSecretStore, Redactor};
-use lev_engine::{in_process_client, Client, Engine, EngineError};
+use lev_engine::{in_process_client, Client, Engine, EngineError, ResolvingStore};
 use lev_http::ClientConfig;
 use lev_protocol::{
-    in_process_channel, BodyDto, Capability, EnvDto, ErrorCode, LogLevel, Message, NdjsonTransport,
-    RequestDto, Transport, VarValueDto, Version,
+    in_process_channel, BodyDto, Capability, EnvDto, ErrorCode, HeaderDto, LogLevel, Message,
+    NdjsonTransport, RequestDto, Transport, VarValueDto, Version,
 };
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
@@ -109,6 +109,73 @@ async fn a_request_travels_through_the_protocol_and_comes_back() {
     client.stop(true).await.expect("stop");
     drop(client);
     handle.await.expect("join").expect("serve");
+}
+
+#[tokio::test]
+async fn a_secret_only_the_keychain_has_is_redacted_before_it_is_echoed() {
+    // The redactor starts empty and the in-memory environment has nothing in it: the
+    // only place this value exists is the stand-in keychain. `X-Keychain` is not one
+    // of the headers masked by name, so the *only* thing that can keep the value out
+    // of the echo is content-based redaction — which means the store had to report
+    // the value to the redactor before the echo was built. That ordering is what
+    // makes keychain secrets usable at all: a keychain has no "list" to build a
+    // redactor from ahead of time.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/guarded"))
+        .and(header("x-keychain", "s3cr3t-from-the-keychain"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{\"ok\":true}"))
+        .mount(&server)
+        .await;
+
+    let mut keychain = MapSecretStore::new();
+    keychain.insert("token", "s3cr3t-from-the-keychain");
+    let store = ResolvingStore::with_fallback(MapSecretStore::new(), Arc::new(keychain));
+    let engine = Engine::new(Arc::new(store), Redactor::new()).expect("engine");
+    let (mut client, handle) = in_process_client(engine, 8).await.expect("connect");
+
+    let mut request = get_request(format!("{}/guarded", server.uri()));
+    request.headers = vec![HeaderDto {
+        name: "X-Keychain".to_string(),
+        value: "{{token}}".to_string(),
+    }];
+    let outcome = client
+        .send_request(request, secret_var_env("token"))
+        .await
+        .expect("request");
+    let echo = outcome.echo;
+
+    // The mock matched the real header, so the value did go out...
+    assert_eq!(outcome.response.status, 200);
+    // ...and the echo — which reflects the request that was actually sent — does not
+    // carry it, only the mask.
+    let echoed = echo
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("x-keychain"))
+        .expect("the header is in the echo");
+    assert_eq!(echoed.value, lev_core::MASK, "{echoed:?}");
+
+    client.stop(true).await.expect("stop");
+    drop(client);
+    handle.await.expect("join").expect("serve");
+}
+
+/// Just the one secret reference, with no auth block to also prove it with.
+fn secret_var_env(name: &str) -> EnvDto {
+    let mut vars = std::collections::BTreeMap::new();
+    vars.insert(
+        name.to_string(),
+        VarValueDto::Secret {
+            secret: name.to_string(),
+        },
+    );
+    EnvDto {
+        vars,
+        base_url: None,
+        auth: None,
+        seed: 0,
+    }
 }
 
 #[tokio::test]

@@ -55,7 +55,8 @@ protocol.
 # Start a local target (a JSON echo server)
 pwsh scripts/dev-server.ps1 -Port 8787
 
-# Set the secret the smoke collection references
+# Set the secret the smoke collection references — or store it in the OS keychain
+# once with `levi secret set smoke_token` and leave the environment alone
 export LEVI_SECRET_smoke_token=supersecret-token      # Windows: $env:LEVI_SECRET_smoke_token = '...'
 
 cargo run -p lev-cli -- request examples/smoke/requests/get-root.yaml --show-body

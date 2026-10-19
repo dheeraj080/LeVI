@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+keyring = "4.2.0"
 lev-core = { version = "0.0.0", path = "../lev-core" }
 lev-http = { version = "0.0.0", path = "../lev-http" }
 lev-protocol = { version = "0.0.0", path = "../lev-protocol" }
