@@ -74,6 +74,27 @@ pub enum AuthDto {
     },
 }
 
+/// One part of a multipart body on the wire.
+///
+/// Exactly one of `value`, `file` or `base64` is meaningful. The CLI resolves a `file`
+/// part to `base64` before sending; an engine that is allowed filesystem access could
+/// resolve it itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartPartDto {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base64: Option<String>,
+}
+
 /// The request body in JSON-native shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -84,6 +105,20 @@ pub enum BodyDto {
     },
     Form {
         fields: Vec<FormFieldDto>,
+    },
+    Multipart {
+        parts: Vec<MultipartPartDto>,
+    },
+    Graphql {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variables: Option<String>,
+        #[serde(
+            rename = "operationName",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        operation_name: Option<String>,
     },
     Raw {
         #[serde(
@@ -256,8 +291,19 @@ pub struct ResponseDto {
     pub version: String,
     pub headers: Vec<HeaderDto>,
     /// The response body as lossy UTF-8, with known secrets scrubbed.
+    ///
+    /// For a binary body this is a lossy rendering; [`ResponseDto::body_base64`] carries
+    /// the bytes.
     pub body: String,
-    /// Length of the (redacted) body in bytes.
+    /// The body as base64 when it is not valid UTF-8, with known secrets scrubbed.
+    ///
+    /// A binary response (an image, a protobuf, a file download) cannot survive a
+    /// `String`, so it is carried here instead of being silently replaced with U+FFFD.
+    /// Redaction can change the bytes and their length; `body_len` remains the length
+    /// of the raw body before redaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_base64: Option<String>,
+    /// Length of the response body in bytes, before redaction.
     pub body_len: usize,
     pub timings: TimingsDto,
     /// How many attempts this response took.
@@ -425,6 +471,7 @@ mod tests {
                 version: "HTTP/1.1".to_string(),
                 headers: vec![],
                 body: String::new(),
+                body_base64: None,
                 body_len: 0,
                 timings: TimingsDto::default(),
                 attempts: 1,
@@ -449,6 +496,64 @@ mod tests {
         let json = "{\"status\":200,\"version\":\"HTTP/1.1\",\"headers\":[],\"body\":\"\",\"bodyLen\":0,\"timings\":{\"totalMs\":1.0,\"ttfbMs\":1.0,\"receiveMs\":0.0}}";
         let response: ResponseDto = serde_json::from_str(json).unwrap();
         assert_eq!(response.attempts, 1);
+        assert_eq!(response.body_base64, None);
+    }
+
+    #[test]
+    fn multipart_and_graphql_bodies_round_trip() {
+        let multipart = BodyDto::Multipart {
+            parts: vec![
+                MultipartPartDto {
+                    name: "title".to_string(),
+                    value: Some("widget".to_string()),
+                    file: None,
+                    filename: None,
+                    content_type: None,
+                    base64: None,
+                },
+                MultipartPartDto {
+                    name: "file".to_string(),
+                    value: None,
+                    file: None,
+                    filename: Some("logo.png".to_string()),
+                    content_type: Some("image/png".to_string()),
+                    base64: Some("iVBORw0KGgo=".to_string()),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&multipart).unwrap();
+        assert!(json.contains("\"kind\":\"multipart\""), "{json}");
+        assert_eq!(serde_json::from_str::<BodyDto>(&json).unwrap(), multipart);
+
+        let graphql = BodyDto::Graphql {
+            query: "query Q { viewer { id } }".to_string(),
+            variables: Some("{\"id\":\"7\"}".to_string()),
+            operation_name: Some("Q".to_string()),
+        };
+        let json = serde_json::to_string(&graphql).unwrap();
+        assert!(json.contains("\"kind\":\"graphql\""), "{json}");
+        assert!(json.contains("\"operationName\":\"Q\""), "{json}");
+        assert_eq!(serde_json::from_str::<BodyDto>(&json).unwrap(), graphql);
+    }
+
+    #[test]
+    fn a_binary_response_carries_exact_bytes_as_base64() {
+        let response = ResponseDto {
+            status: 200,
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: "lossy \u{fffd}".to_string(),
+            body_base64: Some("iVBORw0KGgo=".to_string()),
+            body_len: 8,
+            timings: TimingsDto::default(),
+            attempts: 1,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"bodyBase64\":\"iVBORw0KGgo=\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ResponseDto>(&json).unwrap(),
+            response
+        );
     }
 
     #[test]

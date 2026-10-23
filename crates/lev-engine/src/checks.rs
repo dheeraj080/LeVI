@@ -135,6 +135,7 @@ mod tests {
             ],
             body: Bytes::from(body.to_string()),
             attempts: 1,
+            redirects: 0,
             timings: Timings {
                 total: Duration::from_millis(12),
                 ..Timings::default()

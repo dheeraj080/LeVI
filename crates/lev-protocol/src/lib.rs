@@ -27,7 +27,7 @@ mod version;
 
 pub use dto::{
     ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CheckDto, EchoDto, EnvDto, FormFieldDto,
-    HeaderDto, RequestDto, ResponseDto, ScriptsDto, TimingsDto, VarValueDto,
+    HeaderDto, MultipartPartDto, RequestDto, ResponseDto, ScriptsDto, TimingsDto, VarValueDto,
 };
 pub use error::{ProtocolError, TransportError};
 pub use message::{Capability, ErrorCode, LogLevel, Message};

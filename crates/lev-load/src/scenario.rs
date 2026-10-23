@@ -59,8 +59,10 @@ impl CompiledScenario {
     ) -> Result<Self, LoadError> {
         let (vus, duration) = match &scenario.executor {
             Executor::ConstantVus { vus, duration } => (*vus, *duration),
+            Executor::ConstantRate { duration, .. } => (1, *duration),
+            Executor::RampingRate { duration, .. } => (1, *duration),
         };
-        if vus == 0 {
+        if matches!(scenario.executor, Executor::ConstantVus { vus, .. } if vus == 0) {
             return Err(LoadError::Config(format!(
                 "scenario `{}` has no virtual users",
                 scenario.id

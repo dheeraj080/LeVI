@@ -9,10 +9,12 @@
 mod client;
 pub mod config;
 mod connector;
+mod cookies;
+mod encoding;
 pub mod error;
 pub mod timing;
 
 pub use client::{HttpClient, LoadResponse, Response};
-pub use config::ClientConfig;
+pub use config::{ClientConfig, ProxyConfig, TlsConfig};
 pub use error::HttpError;
 pub use timing::Timings;

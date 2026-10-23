@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use lev_core::{Body, RequestDef};
+use lev_core::{Body, MultipartPart, MultipartValue, RequestDef};
 
 use crate::error::FormatError;
 
@@ -23,24 +23,66 @@ use crate::error::FormatError;
 /// 2 GiB "fixture" would be a memory-exhaustion bug rather than a test.
 pub const MAX_BODY_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Replace a `file:` body with the bytes it names, read from `root`.
+/// Replace `file:` bodies with the bytes they name, read from `root`.
 ///
-/// The content type is taken from the file's extension; an explicit `Content-Type`
-/// header on the request still wins, so an unusual fixture can always be labelled by
-/// hand. A request without a `file:` body is left untouched.
+/// Both a whole-body `file:` and the `file:` value of a multipart part are resolved.
+/// The content type is taken from the file's extension; an explicit request header or
+/// part `contentType` still wins, so an unusual fixture can always be labelled by hand.
+/// A request without a file body is left untouched.
 pub fn resolve_body_files(root: &Path, request: &mut RequestDef) -> Result<(), FormatError> {
-    let Body::File(template) = &request.body else {
-        return Ok(());
-    };
-
-    let reference = template.source();
-    let content = read_body_file(root, reference)?;
-    let content_type = content_type_for(Path::new(reference));
-    request.body = Body::Bytes {
-        content_type: Some(content_type),
-        content,
-    };
+    match &request.body {
+        Body::File(template) => {
+            let reference = template.source();
+            let content = read_body_file(root, reference)?;
+            let content_type = content_type_for(Path::new(reference));
+            request.body = Body::Bytes {
+                content_type: Some(content_type),
+                content,
+            };
+        }
+        Body::Multipart(parts) => {
+            let mut resolved = Vec::with_capacity(parts.len());
+            for part in parts {
+                let value = match &part.value {
+                    MultipartValue::File {
+                        path,
+                        filename,
+                        content_type,
+                    } => {
+                        let reference = path.source();
+                        let content = read_body_file(root, reference)?;
+                        let filename = filename
+                            .clone()
+                            .unwrap_or_else(|| default_filename(reference));
+                        let content_type = content_type
+                            .clone()
+                            .unwrap_or_else(|| content_type_for(Path::new(reference)));
+                        MultipartValue::Bytes {
+                            filename,
+                            content_type: Some(content_type),
+                            content,
+                        }
+                    }
+                    value => value.clone(),
+                };
+                resolved.push(MultipartPart {
+                    name: part.name.clone(),
+                    value,
+                });
+            }
+            request.body = Body::Multipart(resolved);
+        }
+        _ => {}
+    }
     Ok(())
+}
+
+fn default_filename(reference: &str) -> String {
+    Path::new(reference)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(reference)
+        .to_string()
 }
 
 fn read_body_file(root: &Path, reference: &str) -> Result<Vec<u8>, FormatError> {
@@ -140,7 +182,7 @@ fn content_type_for(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lev_core::Method;
+    use lev_core::{Method, MultipartPart, MultipartValue};
 
     fn request_with_file(reference: &str) -> RequestDef {
         RequestDef {
@@ -304,6 +346,44 @@ mod tests {
             Body::Raw {
                 content_type: None,
                 content: "hello".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_multipart_file_part_is_resolved_to_bytes() {
+        let dir = TempDir::new("multipart");
+        let png = [0x89, 0x50, 0x4e, 0x47, 0xff];
+        dir.write("fixtures/logo.png", &png);
+
+        let mut request = request_with_file("unused");
+        request.body = Body::Multipart(vec![
+            MultipartPart {
+                name: "title".to_string(),
+                value: MultipartValue::Text("{{title}}".to_string()),
+            },
+            MultipartPart {
+                name: "file".to_string(),
+                value: MultipartValue::File {
+                    path: lev_core::Template::parse("fixtures/logo.png").unwrap(),
+                    filename: None,
+                    content_type: None,
+                },
+            },
+        ]);
+
+        resolve_body_files(dir.path(), &mut request).expect("resolve");
+
+        let Body::Multipart(parts) = &request.body else {
+            panic!("expected multipart, got {:?}", request.body);
+        };
+        assert_eq!(parts[0].value, MultipartValue::Text("{{title}}".into()));
+        assert_eq!(
+            parts[1].value,
+            MultipartValue::Bytes {
+                filename: "logo.png".to_string(),
+                content_type: Some("image/png".to_string()),
+                content: png.to_vec(),
             }
         );
     }

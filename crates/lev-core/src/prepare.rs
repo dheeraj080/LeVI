@@ -16,13 +16,17 @@
 //! overhead. A long-lived [`Context`] also means the dynamic functions
 //! (`{{$uuid}}`, `{{$randomInt}}`) keep advancing instead of repeating themselves.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
 
 use crate::context::Context;
 use crate::error::{CoreError, Result};
-use crate::model::{ApiKeyLocation, Auth, Body, Collection, Method, RequestDef, VarSet, VarValue};
+use crate::model::{
+    ApiKeyLocation, Auth, Body, Collection, Method, MultipartPart, MultipartValue, RequestDef,
+    VarSet, VarValue,
+};
 use crate::secrets::SecretStore;
 use crate::template::Template;
 
@@ -52,21 +56,50 @@ pub struct CompiledRequest {
     body: CompiledBody,
     auth: Option<CompiledAuth>,
     timeout: Option<Duration>,
+    pub scripts: crate::model::Scripts,
+    pub assertions: Vec<crate::assert::Assertion>,
 }
 
 /// A request body with its templates parsed. Mirrors [`Body`], with the source text
-/// of `json` / `raw` / `file` replaced by a parsed [`Template`].
+/// of `json` / `graphql` / `raw` / `file` replaced by a parsed [`Template`].
 #[derive(Debug, Clone, PartialEq)]
 enum CompiledBody {
     None,
     Json(Template),
     Form(Vec<(String, String)>),
+    Multipart(Vec<CompiledMultipartPart>),
+    Graphql {
+        query: Template,
+        variables: Option<Template>,
+        operation_name: Option<String>,
+    },
     Raw {
         content_type: Option<String>,
         content: Template,
     },
     File(Template),
     Bytes {
+        content_type: Option<String>,
+        content: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompiledMultipartPart {
+    name: String,
+    value: CompiledMultipartValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CompiledMultipartValue {
+    Text(Template),
+    File {
+        path: Template,
+        filename: Option<String>,
+        content_type: Option<String>,
+    },
+    Bytes {
+        filename: String,
         content_type: Option<String>,
         content: Vec<u8>,
     },
@@ -105,6 +138,8 @@ pub fn compile_request(collection: &Collection, request: &RequestDef) -> Result<
             .or(collection.auth.as_ref())
             .map(compile_auth),
         timeout: request.timeout,
+        scripts: request.scripts.clone(),
+        assertions: request.assertions.clone(),
     })
 }
 
@@ -178,6 +213,21 @@ fn compile_body(body: &Body) -> Result<CompiledBody> {
         Body::None => CompiledBody::None,
         Body::Json(source) => CompiledBody::Json(Template::parse(source)?),
         Body::Form(fields) => CompiledBody::Form(fields.clone()),
+        Body::Multipart(parts) => CompiledBody::Multipart(
+            parts
+                .iter()
+                .map(compile_multipart_part)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Body::Graphql {
+            query,
+            variables,
+            operation_name,
+        } => CompiledBody::Graphql {
+            query: Template::parse(query)?,
+            variables: variables.as_deref().map(Template::parse).transpose()?,
+            operation_name: operation_name.clone(),
+        },
         Body::Raw {
             content_type,
             content,
@@ -193,6 +243,34 @@ fn compile_body(body: &Body) -> Result<CompiledBody> {
             content_type: content_type.clone(),
             content: content.clone(),
         },
+    })
+}
+
+fn compile_multipart_part(part: &MultipartPart) -> Result<CompiledMultipartPart> {
+    let value = match &part.value {
+        MultipartValue::Text(text) => CompiledMultipartValue::Text(Template::parse(text)?),
+        MultipartValue::File {
+            path,
+            filename,
+            content_type,
+        } => CompiledMultipartValue::File {
+            path: path.clone(),
+            filename: filename.clone(),
+            content_type: content_type.clone(),
+        },
+        MultipartValue::Bytes {
+            filename,
+            content_type,
+            content,
+        } => CompiledMultipartValue::Bytes {
+            filename: filename.clone(),
+            content_type: content_type.clone(),
+            content: content.clone(),
+        },
+    };
+    Ok(CompiledMultipartPart {
+        name: part.name.clone(),
+        value,
     })
 }
 
@@ -241,6 +319,35 @@ impl CompiledBody {
                     Some("application/x-www-form-urlencoded".to_string()),
                 ))
             }
+            CompiledBody::Multipart(parts) => render_multipart(parts, ctx),
+            CompiledBody::Graphql {
+                query,
+                variables,
+                operation_name,
+            } => {
+                let query = query.render(ctx)?;
+                let variables = match variables {
+                    Some(template) => template.render(ctx)?,
+                    None => String::new(),
+                };
+                let variables = if variables.trim().is_empty() {
+                    "{}".to_string()
+                } else {
+                    variables
+                };
+                let mut payload = format!(
+                    "{{\"query\":\"{}\",\"variables\":{}",
+                    json_escape(&query),
+                    variables
+                );
+                if let Some(name) = operation_name {
+                    payload.push_str(",\"operationName\":\"");
+                    payload.push_str(&json_escape(name));
+                    payload.push('"');
+                }
+                payload.push('}');
+                Ok((payload.into_bytes(), Some("application/json".to_string())))
+            }
             CompiledBody::File(template) => {
                 let reference = template.render(ctx)?;
                 Err(CoreError::UnsupportedBody(format!(
@@ -266,14 +373,14 @@ impl CompiledAuth {
         match self {
             CompiledAuth::Bearer(token) => {
                 let token = token.render(ctx)?;
-                headers.push(("authorization".to_string(), format!("Bearer {token}")));
+                set_header(headers, "authorization", format!("Bearer {token}"));
             }
             CompiledAuth::Basic { username, password } => {
                 let user = username.render(ctx)?;
                 let pass = ctx.resolve_value(password)?;
                 let encoded =
                     base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-                headers.push(("authorization".to_string(), format!("Basic {encoded}")));
+                set_header(headers, "authorization", format!("Basic {encoded}"));
             }
             CompiledAuth::ApiKey {
                 name,
@@ -282,8 +389,8 @@ impl CompiledAuth {
             } => {
                 let value = ctx.resolve_value(value)?;
                 match location {
-                    ApiKeyLocation::Header => headers.push((name.clone(), value)),
-                    ApiKeyLocation::Query => append_query(url, name, &value),
+                    ApiKeyLocation::Header => set_header(headers, name, value),
+                    ApiKeyLocation::Query => set_query_param(url, name, &value),
                 }
             }
         }
@@ -291,32 +398,200 @@ impl CompiledAuth {
     }
 }
 
+/// Replace a header rather than append a duplicate.
+///
+/// Auth is applied after the collection's own headers, so `Authorization:` must be
+/// the one auth decided on, not a second one that the target may pick instead.
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
+    headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+    headers.push((name.to_string(), value));
+}
+
 fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+}
+
+fn json_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 2);
+    for character in input.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            character if (character as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => out.push(character),
+        }
+    }
+    out
+}
+
+static MULTIPART_BOUNDARY: AtomicU64 = AtomicU64::new(0);
+
+fn render_multipart(
+    parts: &[CompiledMultipartPart],
+    ctx: &mut Context<'_>,
+) -> Result<(Vec<u8>, Option<String>)> {
+    let boundary = format!(
+        "----LeviFormBoundary{:016x}",
+        MULTIPART_BOUNDARY.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut out = Vec::new();
+    for part in parts {
+        out.extend_from_slice(b"--");
+        out.extend_from_slice(boundary.as_bytes());
+        out.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"");
+        out.extend_from_slice(quoted(&part.name).as_bytes());
+        out.push(b'"');
+        match &part.value {
+            CompiledMultipartValue::Text(template) => {
+                let value = template.render(ctx)?;
+                out.extend_from_slice(b"\r\n\r\n");
+                out.extend_from_slice(value.as_bytes());
+            }
+            CompiledMultipartValue::File { path, .. } => {
+                let reference = path.render(ctx)?;
+                return Err(CoreError::UnsupportedBody(format!(
+                    "multipart file `{reference}` was never resolved: a loader that can do \
+                     I/O (`lev-format::resolve_body_files`) must read it into bytes first"
+                )));
+            }
+            CompiledMultipartValue::Bytes {
+                filename,
+                content_type,
+                content,
+            } => {
+                out.extend_from_slice(b"; filename=\"");
+                out.extend_from_slice(quoted(filename).as_bytes());
+                out.extend_from_slice(b"\"\r\n");
+                if let Some(content_type) = content_type {
+                    out.extend_from_slice(b"Content-Type: ");
+                    out.extend_from_slice(content_type.as_bytes());
+                    out.extend_from_slice(b"\r\n");
+                }
+                out.extend_from_slice(b"\r\n");
+                out.extend_from_slice(content);
+            }
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"--");
+    out.extend_from_slice(boundary.as_bytes());
+    out.extend_from_slice(b"--\r\n");
+    Ok((
+        out,
+        Some(format!("multipart/form-data; boundary={boundary}")),
+    ))
+}
+
+/// Escape a multipart parameter: quotes and line breaks, per RFC 7578.
+fn quoted(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
 }
 
 fn join_url(base: Option<&str>, url: &str) -> Result<String> {
     if url.starts_with("http://") || url.starts_with("https://") {
         return Ok(url.to_string());
     }
-    match base {
-        Some(base) => Ok(format!(
-            "{}/{}",
-            base.trim_end_matches('/'),
-            url.trim_start_matches('/')
-        )),
-        None => Err(CoreError::InvalidUrl(format!(
+    let Some(base) = base else {
+        return Err(CoreError::InvalidUrl(format!(
             "{url} is relative and the collection has no baseUrl"
-        ))),
+        )));
+    };
+    let base = base.trim_end_matches('/');
+    if url.is_empty() {
+        return Ok(base.to_string());
     }
+    // A query or fragment continues the base path directly; a path segment needs a
+    // separator. This keeps the prefix semantics of `baseUrl` (an API root such as
+    // `https://api.test/v1`) instead of RFC 3986's root-relative semantics for a
+    // leading slash.
+    if url.starts_with('?') || url.starts_with('#') {
+        return Ok(format!("{base}{url}"));
+    }
+    Ok(remove_dot_segments(&format!(
+        "{base}/{}",
+        url.trim_start_matches('/')
+    )))
 }
 
-fn append_query(url: &mut String, name: &str, value: &str) {
-    let separator = if url.contains('?') { '&' } else { '?' };
-    url.push(separator);
-    url.push_str(&query_encode(name));
-    url.push('=');
-    url.push_str(&query_encode(value));
+/// Resolve `.` and `..` path segments after a base and a relative URL are joined.
+///
+/// The scheme and authority are preserved verbatim; only the path is normalized, and
+/// a trailing slash survives. This is what makes `../v2/orders` against a
+/// `https://api.test/v1` base produce `https://api.test/v2/orders`.
+fn remove_dot_segments(url: &str) -> String {
+    let authority_end = url.find("://").map_or(0, |index| index + 3);
+    let path_start = url[authority_end..]
+        .find('/')
+        .map_or(url.len(), |index| authority_end + index);
+    let prefix = &url[..path_start];
+    let rest = &url[path_start..];
+    let (path, suffix) = match rest.find(['?', '#']) {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+
+    let trailing_slash = path.ends_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+
+    let mut normalized = String::from(prefix);
+    if path.starts_with('/') {
+        normalized.push('/');
+    }
+    normalized.push_str(&segments.join("/"));
+    if trailing_slash && !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+    normalized.push_str(suffix);
+    normalized
+}
+
+fn set_query_param(url: &mut String, name: &str, value: &str) {
+    let (before_fragment, fragment) = match url.split_once('#') {
+        Some((before, fragment)) => (before, Some(fragment)),
+        None => (url.as_str(), None),
+    };
+    let (path, query) = match before_fragment.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (before_fragment, ""),
+    };
+    let encoded_name = query_encode(name);
+    let mut pairs: Vec<String> = query
+        .split('&')
+        .filter(|pair| {
+            if pair.is_empty() {
+                return false;
+            }
+            let key = pair.split_once('=').map_or(*pair, |(key, _)| key);
+            key != name && key != encoded_name
+        })
+        .map(str::to_string)
+        .collect();
+    pairs.push(format!("{encoded_name}={}", query_encode(value)));
+
+    let mut next = format!("{path}?{}", pairs.join("&"));
+    if let Some(fragment) = fragment {
+        next.push('#');
+        next.push_str(fragment);
+    }
+    *url = next;
 }
 
 fn is_unreserved(byte: u8) -> bool {
@@ -628,5 +903,144 @@ mod tests {
 
         let one_shot = prepare_request(&collection(None), &req, vars(&[]), &store).unwrap();
         assert_eq!(one_shot.timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn dot_segments_are_resolved_after_joining_the_base() {
+        let store = MapSecretStore::new();
+        let prepared = prepare_request(
+            &collection(Some("https://api.test/v1")),
+            &request("../v2/orders?x=1"),
+            vars(&[]),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(prepared.url, "https://api.test/v2/orders?x=1");
+    }
+
+    #[test]
+    fn auth_replaces_an_existing_authorization_header() {
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/me");
+        req.headers = vec![(
+            Template::parse("Authorization").unwrap(),
+            Template::parse("Bearer stale").unwrap(),
+        )];
+        req.auth = Some(Auth::Bearer(Template::parse("fresh").unwrap()));
+
+        let prepared = prepare_request(&collection(None), &req, vars(&[]), &store).unwrap();
+        let values: Vec<&str> = prepared
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(values, vec!["Bearer fresh"]);
+    }
+
+    #[test]
+    fn a_query_api_key_replaces_a_stale_value() {
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/me?api_key=old&keep=1");
+        req.auth = Some(Auth::ApiKey {
+            name: "api_key".to_string(),
+            value: VarValue::Plain("new".to_string()),
+            location: ApiKeyLocation::Query,
+        });
+        let prepared = prepare_request(&collection(None), &req, vars(&[]), &store).unwrap();
+        assert_eq!(prepared.url, "https://api.test/me?keep=1&api_key=new");
+    }
+
+    #[test]
+    fn a_multipart_body_carries_text_and_bytes_under_one_boundary() {
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/upload");
+        req.method = Method::Post;
+        req.body = Body::Multipart(vec![
+            MultipartPart {
+                name: "title".to_string(),
+                value: MultipartValue::Text("{{name}}".to_string()),
+            },
+            MultipartPart {
+                name: "file".to_string(),
+                value: MultipartValue::Bytes {
+                    filename: "logo.png".to_string(),
+                    content_type: Some("image/png".to_string()),
+                    content: vec![0x89, 0x50, 0x4e, 0x47, 0xff],
+                },
+            },
+        ]);
+
+        let prepared =
+            prepare_request(&collection(None), &req, vars(&[("name", "widget")]), &store).unwrap();
+        let content_type = header(&prepared.headers, "content-type").unwrap();
+        let boundary = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .expect("a boundary is mandatory");
+        let body = &prepared.body;
+        let opening = format!("--{boundary}");
+        let closing = format!("--{boundary}--\r\n");
+
+        let needles: [&[u8]; 6] = [
+            opening.as_bytes(),
+            b"name=\"title\"",
+            b"widget",
+            b"filename=\"logo.png\"",
+            b"Content-Type: image/png",
+            &[0x89, 0x50, 0x4e, 0x47, 0xff],
+        ];
+        for needle in needles {
+            assert!(
+                body.windows(needle.len()).any(|window| window == needle),
+                "missing {:?}",
+                String::from_utf8_lossy(needle)
+            );
+        }
+        assert!(
+            body.ends_with(closing.as_bytes()),
+            "the closing delimiter is part of the body"
+        );
+    }
+
+    #[test]
+    fn a_multipart_file_must_be_resolved_by_a_loader() {
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/upload");
+        req.method = Method::Post;
+        req.body = Body::Multipart(vec![MultipartPart {
+            name: "file".to_string(),
+            value: MultipartValue::File {
+                path: Template::parse("fixtures/logo.png").unwrap(),
+                filename: None,
+                content_type: None,
+            },
+        }]);
+
+        let error = prepare_request(&collection(None), &req, vars(&[]), &store)
+            .expect_err("must not guess");
+        assert!(error.to_string().contains("never resolved"), "{error}");
+    }
+
+    #[test]
+    fn a_graphql_body_is_the_standard_json_envelope() {
+        let store = MapSecretStore::new();
+        let mut req = request("https://api.test/graphql");
+        req.method = Method::Post;
+        req.body = Body::Graphql {
+            query: "query Order($id: ID!) { order(id: $id) { sku } }".to_string(),
+            variables: Some("{\"id\":\"{{id}}\"}".to_string()),
+            operation_name: Some("Order".to_string()),
+        };
+
+        let prepared =
+            prepare_request(&collection(None), &req, vars(&[("id", "7")]), &store).unwrap();
+        assert_eq!(
+            header(&prepared.headers, "content-type"),
+            Some("application/json")
+        );
+        assert_eq!(
+            prepared.body,
+            br#"{"query":"query Order($id: ID!) { order(id: $id) { sku } }","variables":{"id":"7"},"operationName":"Order"}"#
+        );
     }
 }

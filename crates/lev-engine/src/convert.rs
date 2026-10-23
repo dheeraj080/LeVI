@@ -9,12 +9,13 @@ use std::time::Duration;
 
 use lev_core::{
     base64_decode, base64_encode, ApiKeyLocation, Assertion, Auth, Body, Check, Collection, Method,
-    PreparedRequest, Redactor, RequestDef, Scripts, SecretName, Template, VarSet, VarValue,
+    MultipartPart, MultipartValue, PreparedRequest, Redactor, RequestDef, Scripts, SecretName,
+    Template, VarSet, VarValue,
 };
 use lev_http::{Response, Timings};
 use lev_protocol::{
     ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, CheckDto, EchoDto, EnvDto, FormFieldDto,
-    HeaderDto, RequestDto, ResponseDto, ScriptsDto, TimingsDto, VarValueDto,
+    HeaderDto, MultipartPartDto, RequestDto, ResponseDto, ScriptsDto, TimingsDto, VarValueDto,
 };
 
 use crate::error::EngineError;
@@ -199,6 +200,11 @@ pub fn echo_to_dto(prepared: &PreparedRequest, redactor: &Redactor) -> EchoDto {
 pub fn response_to_dto(response: &Response, redactor: &Redactor) -> ResponseDto {
     let text = String::from_utf8_lossy(&response.body);
     let body = redactor.redact(&text);
+    let body_base64 = if std::str::from_utf8(&response.body).is_ok() {
+        None
+    } else {
+        Some(base64_encode(&redactor.redact_bytes(&response.body)))
+    };
     ResponseDto {
         status: response.status,
         version: response.version.clone(),
@@ -210,8 +216,9 @@ pub fn response_to_dto(response: &Response, redactor: &Redactor) -> ResponseDto 
                 value: redactor.redact_header_value(name, value),
             })
             .collect(),
-        body_len: body.len(),
+        body_len: response.body.len(),
         body,
+        body_base64,
         timings: timings_to_dto(&response.timings),
         attempts: response.attempts,
     }
@@ -310,6 +317,21 @@ fn body_from_dto(dto: Option<BodyDto>) -> Result<Body, EngineError> {
                 .map(|field| (field.name, field.value))
                 .collect(),
         ),
+        Some(BodyDto::Multipart { parts }) => Body::Multipart(
+            parts
+                .into_iter()
+                .map(multipart_part_from_dto)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Some(BodyDto::Graphql {
+            query,
+            variables,
+            operation_name,
+        }) => Body::Graphql {
+            query,
+            variables,
+            operation_name,
+        },
         Some(BodyDto::Raw {
             content_type,
             content,
@@ -343,6 +365,18 @@ fn body_to_dto(body: &Body) -> Option<BodyDto> {
                 })
                 .collect(),
         }),
+        Body::Multipart(parts) => Some(BodyDto::Multipart {
+            parts: parts.iter().map(multipart_part_to_dto).collect(),
+        }),
+        Body::Graphql {
+            query,
+            variables,
+            operation_name,
+        } => Some(BodyDto::Graphql {
+            query: query.clone(),
+            variables: variables.clone(),
+            operation_name: operation_name.clone(),
+        }),
         Body::Raw {
             content_type,
             content,
@@ -360,6 +394,73 @@ fn body_to_dto(body: &Body) -> Option<BodyDto> {
             content_type: content_type.clone(),
             base64: base64_encode(content),
         }),
+    }
+}
+
+fn multipart_part_from_dto(dto: MultipartPartDto) -> Result<MultipartPart, EngineError> {
+    let MultipartPartDto {
+        name,
+        value,
+        file,
+        filename,
+        content_type,
+        base64,
+    } = dto;
+    let value = match (value, file, base64) {
+        (Some(value), None, None) => MultipartValue::Text(value),
+        (None, Some(file), None) => MultipartValue::File {
+            path: parse_template(&file)?,
+            filename,
+            content_type,
+        },
+        (None, None, Some(base64)) => MultipartValue::Bytes {
+            filename: filename.unwrap_or_else(|| "blob".to_string()),
+            content_type,
+            content: base64_decode(&base64)?,
+        },
+        _ => {
+            return Err(EngineError::Config(format!(
+                "multipart part `{name}` takes exactly one of `value`, `file`, `base64`"
+            )))
+        }
+    };
+    Ok(MultipartPart { name, value })
+}
+
+fn multipart_part_to_dto(part: &MultipartPart) -> MultipartPartDto {
+    match &part.value {
+        MultipartValue::Text(value) => MultipartPartDto {
+            name: part.name.clone(),
+            value: Some(value.clone()),
+            file: None,
+            filename: None,
+            content_type: None,
+            base64: None,
+        },
+        MultipartValue::File {
+            path,
+            filename,
+            content_type,
+        } => MultipartPartDto {
+            name: part.name.clone(),
+            value: None,
+            file: Some(path.source().to_string()),
+            filename: filename.clone(),
+            content_type: content_type.clone(),
+            base64: None,
+        },
+        MultipartValue::Bytes {
+            filename,
+            content_type,
+            content,
+        } => MultipartPartDto {
+            name: part.name.clone(),
+            value: None,
+            file: None,
+            filename: Some(filename.clone()),
+            content_type: content_type.clone(),
+            base64: Some(base64_encode(content)),
+        },
     }
 }
 
@@ -470,6 +571,28 @@ mod tests {
 
         let rebuilt = request_from_dto(request_to_dto(&original)).unwrap();
         assert_eq!(original, rebuilt);
+    }
+
+    #[test]
+    fn a_secret_in_a_binary_response_is_redacted_before_base64() {
+        let response = Response {
+            status: 200,
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: bytes::Bytes::from_static(b"\x89PNG\x00s3cr3t\xff"),
+            attempts: 1,
+            redirects: 0,
+            timings: Timings::default(),
+        };
+        let dto = response_to_dto(&response, &Redactor::with_secrets(["s3cr3t"]));
+        let encoded = dto.body_base64.expect("invalid UTF-8 is carried as base64");
+        let decoded = base64_decode(&encoded).unwrap();
+        assert!(
+            !decoded.windows(6).any(|window| window == b"s3cr3t"),
+            "the secret survived redaction"
+        );
+        assert!(decoded.starts_with(b"\x89PNG\x00"));
+        assert!(decoded.ends_with(b"\xff"));
     }
 
     #[test]

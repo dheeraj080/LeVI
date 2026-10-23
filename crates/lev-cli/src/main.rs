@@ -26,6 +26,7 @@ use lev_engine::{
 use lev_format::{
     load_collection, load_request, load_scenario, load_vars, resolve_body_files, FormatError, Yaml,
 };
+use lev_http::{ClientConfig, ProxyConfig, TlsConfig};
 use lev_load::{CompiledScenario, JsonReporter, LoadError, Reporter, RunConfig};
 use lev_metrics::{RunId, RunReport, StopReason, ThresholdResult, ThresholdUnit};
 use lev_protocol::{EchoDto, ErrorCode, NdjsonTransport, ResponseDto, TimingsDto};
@@ -121,7 +122,23 @@ REQUEST OPTIONS:
                          Also retry POST/PATCH. A retried POST can send twice,
                          so it is never what `--retries` alone implies.
     --show-body          Print the (redacted) response body
-    --max-body <bytes>   Truncate the printed body [default: 4096]
+    --max-body <bytes>   Truncate the printed body by bytes [default: 4096]
+
+TRANSPORT OPTIONS (request and run):
+    --no-redirects       Return a 3xx instead of following it
+    --max-redirects <n>  Follow at most n redirects; 0 disables [default: 10]
+    --no-cookies         Do not keep or send cookies
+    --cookies            Keep and send cookies (request: default; run: off, because
+                         a run shares one jar across every virtual user)
+    --no-compression     Do not advertise gzip, deflate or br
+    --proxy <url>        HTTP proxy: http://[user:password@]host[:port]
+    --no-proxy <hosts>   Comma-separated hosts reached directly
+    --insecure           Accept any TLS certificate (development only)
+    --cacert <file>      Add a PEM/DER root certificate (repeatable)
+    --client-cert <file> Client certificate chain for mutual TLS
+    --client-key <file>  Private key matching --client-cert
+    --max-response-bytes <n>
+                         Refuse a buffered response larger than n bytes
 
 RUN OPTIONS:
     --collection <dir>   Collection directory (default: the scenario file's folder)
@@ -322,8 +339,10 @@ async fn run_request(args: &[String]) -> Result<(), Fail> {
             "--retry-non-idempotent does nothing without --retries",
         ));
     }
-    let engine =
-        Engine::with_os_secrets()?.with_retries(options.retries, options.retry_non_idempotent)?;
+    let mut client_config = options.transport.client_config()?;
+    client_config.retries = options.retries;
+    client_config.retry_non_idempotent = options.retry_non_idempotent;
+    let engine = Engine::with_os_secrets()?.with_client_config(client_config)?;
     let (mut client, handle) = in_process_client(engine, 8).await?;
 
     let outcome = client.send_request(request_dto, env_dto).await?;
@@ -421,6 +440,7 @@ async fn run_load(args: &[String]) -> Result<(), Fail> {
         Arc::new(store_from_env()),
         options.seed,
     )
+    .with_client_config(options.transport.client_config()?)
     .with_cancel(cancel);
     if let Some(workers) = options.workers {
         config = config.with_workers(workers);
@@ -833,15 +853,52 @@ fn print_response(response: &ResponseDto, show_body: bool, max_body: usize) {
         return;
     }
 
-    let truncated = response.body.len() > max_body;
-    let shown: String = response.body.chars().take(max_body).collect();
     println!();
+    if let Some(encoded) = &response.body_base64 {
+        let bytes = lev_core::base64_decode(encoded).unwrap_or_default();
+        let shown = &bytes[..bytes.len().min(max_body)];
+        if bytes.len() > max_body {
+            println!(
+                "response body (binary, {} bytes; first {} bytes as hex):",
+                bytes.len(),
+                shown.len()
+            );
+        } else {
+            println!("response body (binary, {} bytes as hex):", bytes.len());
+        }
+        println!("{}", hex(shown));
+        return;
+    }
+
+    let (shown, truncated) = truncate_utf8(&response.body, max_body);
     if truncated {
-        println!("response body (first {max_body} bytes):");
+        println!("response body (first {} bytes):", shown.len());
     } else {
         println!("response body:");
     }
     println!("{shown}");
+}
+
+/// Truncate text on a character boundary, so a byte limit never panics mid-codepoint.
+fn truncate_utf8(text: &str, max_bytes: usize) -> (&str, bool) {
+    if text.len() <= max_bytes {
+        return (text, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+/// Render bytes as lowercase hex, two characters per byte.
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn print_checks(outcome: &RequestOutcome) {
@@ -907,6 +964,146 @@ fn discover_collection_dir(request_path: &Path) -> PathBuf {
     start
 }
 
+/// The transport flags shared by `request` and `run`.
+///
+/// They are deliberately not collection fields: how hard to try, whether to trust a
+/// certificate, and which proxy to use are properties of the machine and the run, not
+/// of the API being tested.
+#[derive(Debug, Default)]
+struct TransportOptions {
+    follow_redirects: Option<bool>,
+    max_redirects: Option<u32>,
+    cookies: Option<bool>,
+    compression: Option<bool>,
+    proxy: Option<String>,
+    no_proxy: Vec<String>,
+    insecure: bool,
+    ca_certs: Vec<PathBuf>,
+    client_cert: Option<PathBuf>,
+    client_key: Option<PathBuf>,
+    max_response_bytes: Option<u64>,
+}
+
+impl TransportOptions {
+    /// Consume one transport flag, returning false if it is not one.
+    ///
+    /// `index` is advanced past any value, exactly like the per-command parsers.
+    fn consume(&mut self, args: &[String], index: &mut usize, flag: &str) -> Result<bool, Fail> {
+        match flag {
+            "--follow-redirects" => self.follow_redirects = Some(true),
+            "--no-redirects" => self.follow_redirects = Some(false),
+            "--max-redirects" => {
+                *index += 1;
+                let value = next_value(args, *index, "--max-redirects")?;
+                self.max_redirects = Some(value.parse().map_err(|_| {
+                    Fail::config(format!(
+                        "--max-redirects must be a whole number, got `{value}`"
+                    ))
+                })?);
+            }
+            "--cookies" => self.cookies = Some(true),
+            "--no-cookies" => self.cookies = Some(false),
+            "--compression" => self.compression = Some(true),
+            "--no-compression" => self.compression = Some(false),
+            "--proxy" => {
+                *index += 1;
+                self.proxy = Some(next_value(args, *index, "--proxy")?.to_string());
+            }
+            "--no-proxy" => {
+                *index += 1;
+                let value = next_value(args, *index, "--no-proxy")?;
+                self.no_proxy.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|host| !host.is_empty())
+                        .map(str::to_string),
+                );
+            }
+            "--insecure" => self.insecure = true,
+            "--cacert" => {
+                *index += 1;
+                self.ca_certs
+                    .push(PathBuf::from(next_value(args, *index, "--cacert")?));
+            }
+            "--client-cert" => {
+                *index += 1;
+                self.client_cert = Some(PathBuf::from(next_value(args, *index, "--client-cert")?));
+            }
+            "--client-key" => {
+                *index += 1;
+                self.client_key = Some(PathBuf::from(next_value(args, *index, "--client-key")?));
+            }
+            "--max-response-bytes" => {
+                *index += 1;
+                let value = next_value(args, *index, "--max-response-bytes")?;
+                let limit: u64 = value.parse().map_err(|_| {
+                    Fail::config(format!(
+                        "--max-response-bytes must be a whole number, got `{value}`"
+                    ))
+                })?;
+                if limit == 0 {
+                    return Err(Fail::config("--max-response-bytes must be greater than 0"));
+                }
+                self.max_response_bytes = Some(limit);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn client_config(&self) -> Result<ClientConfig, Fail> {
+        let mut config = ClientConfig::default();
+
+        if self.follow_redirects == Some(false) {
+            config = config.without_redirects();
+        }
+        if let Some(max) = self.max_redirects {
+            if max == 0 {
+                config = config.without_redirects();
+            } else {
+                config = config.with_max_redirects(max);
+            }
+        }
+        if self.cookies == Some(false) {
+            config = config.without_cookies();
+        }
+        if self.compression == Some(false) {
+            config = config.without_compression();
+        }
+        if let Some(limit) = self.max_response_bytes {
+            config = config.with_max_response_bytes(limit);
+        }
+
+        if self.client_cert.is_some() != self.client_key.is_some() {
+            return Err(Fail::config(
+                "--client-cert and --client-key must be given together",
+            ));
+        }
+        if self.insecure
+            || !self.ca_certs.is_empty()
+            || self.client_cert.is_some()
+            || self.client_key.is_some()
+        {
+            config = config.with_tls(TlsConfig {
+                insecure: self.insecure,
+                ca_certs: self.ca_certs.clone(),
+                client_cert: self.client_cert.clone(),
+                client_key: self.client_key.clone(),
+            });
+        }
+
+        if let Some(proxy) = &self.proxy {
+            config = config
+                .with_proxy(ProxyConfig::new(proxy.clone()).with_no_proxy(self.no_proxy.clone()));
+        } else if !self.no_proxy.is_empty() {
+            return Err(Fail::config("--no-proxy needs --proxy"));
+        }
+
+        Ok(config)
+    }
+}
+
 struct RequestOptions {
     file: PathBuf,
     collection: Option<PathBuf>,
@@ -917,6 +1114,7 @@ struct RequestOptions {
     timeout: Option<Duration>,
     retries: u32,
     retry_non_idempotent: bool,
+    transport: TransportOptions,
 }
 
 impl RequestOptions {
@@ -930,6 +1128,7 @@ impl RequestOptions {
         let mut timeout = None;
         let mut retries = 0u32;
         let mut retry_non_idempotent = false;
+        let mut transport = TransportOptions::default();
 
         let mut index = 0;
         while index < args.len() {
@@ -975,7 +1174,9 @@ impl RequestOptions {
                     std::process::exit(0);
                 }
                 other if other.starts_with('-') => {
-                    return Err(Fail::config(format!("unknown option `{other}`")));
+                    if !transport.consume(args, &mut index, other)? {
+                        return Err(Fail::config(format!("unknown option `{other}`")));
+                    }
                 }
                 _ => {
                     if file.is_some() {
@@ -998,6 +1199,7 @@ impl RequestOptions {
             timeout,
             retries,
             retry_non_idempotent,
+            transport,
         })
     }
 }
@@ -1031,6 +1233,7 @@ struct RunOptions {
     out: Option<PathBuf>,
     quiet: bool,
     timeout: Option<Duration>,
+    transport: TransportOptions,
 }
 
 impl RunOptions {
@@ -1043,6 +1246,13 @@ impl RunOptions {
         let mut out = None;
         let mut quiet = false;
         let mut timeout = None;
+        // A run shares one client — and therefore one cookie jar — across every
+        // virtual user. That silently merges their sessions, so cookies stay off
+        // unless the author asks for the shared-jar behaviour explicitly.
+        let mut transport = TransportOptions {
+            cookies: Some(false),
+            ..TransportOptions::default()
+        };
 
         let mut index = 0;
         while index < args.len() {
@@ -1088,7 +1298,9 @@ impl RunOptions {
                     std::process::exit(0);
                 }
                 other if other.starts_with('-') => {
-                    return Err(Fail::config(format!("unknown option `{other}`")));
+                    if !transport.consume(args, &mut index, other)? {
+                        return Err(Fail::config(format!("unknown option `{other}`")));
+                    }
                 }
                 _ => {
                     if file.is_some() {
@@ -1110,6 +1322,7 @@ impl RunOptions {
             out,
             quiet,
             timeout,
+            transport,
         })
     }
 }

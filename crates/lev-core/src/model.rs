@@ -119,7 +119,36 @@ impl Method {
     }
 }
 
-/// Request body. `Json` is stored as source text so it can be templated.
+/// One part of a `multipart/form-data` body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultipartPart {
+    /// The form field name.
+    pub name: String,
+    pub value: MultipartValue,
+}
+
+/// What one multipart part carries.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultipartValue {
+    /// Text, templated at send time.
+    Text(String),
+    /// A file reference. Resolved to [`MultipartValue::Bytes`] by the loader before
+    /// the request is sent, because `lev-core` is pure and cannot read the disk.
+    File {
+        path: Template,
+        filename: Option<String>,
+        content_type: Option<String>,
+    },
+    /// File bytes, already read and carried verbatim.
+    Bytes {
+        filename: String,
+        content_type: Option<String>,
+        content: Vec<u8>,
+    },
+}
+
+/// Request body. `Json`, `Graphql` and text parts are stored as source text so they
+/// can be templated.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Body {
     #[default]
@@ -129,6 +158,15 @@ pub enum Body {
     Raw {
         content_type: Option<String>,
         content: String,
+    },
+    /// A `multipart/form-data` body. File parts are resolved by the loader, exactly
+    /// like [`Body::File`].
+    Multipart(Vec<MultipartPart>),
+    /// A GraphQL operation, transported as the standard JSON envelope.
+    Graphql {
+        query: String,
+        variables: Option<String>,
+        operation_name: Option<String>,
     },
     /// A body read from a file. `lev-core` is pure, so the reference is resolved by a
     /// loader that can do I/O (`lev-format`), which replaces it with [`Body::Bytes`]

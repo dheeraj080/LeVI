@@ -105,6 +105,10 @@ pub struct RunConfig {
     /// `None` leaves the transport default (30 s); an explicit `timeout:` on a
     /// request always wins over this.
     pub request_timeout: Option<Duration>,
+    /// Transport policy for the load path: redirects, cookies, TLS, proxy, and the
+    /// response bound. Retries are forced off when the sender is built, because a
+    /// load report must count every request the target saw.
+    pub client: ClientConfig,
 }
 
 impl RunConfig {
@@ -127,6 +131,7 @@ impl RunConfig {
             cancel: CancellationToken::new(),
             graceful_stop: DEFAULT_GRACEFUL_STOP,
             request_timeout: None,
+            client: ClientConfig::default(),
         }
     }
 
@@ -160,6 +165,12 @@ impl RunConfig {
         self.request_timeout = request_timeout;
         self
     }
+
+    /// Set the transport policy for every request in the run.
+    pub fn with_client_config(mut self, client: ClientConfig) -> Self {
+        self.client = client;
+        self
+    }
 }
 
 fn default_worker_count() -> usize {
@@ -176,7 +187,7 @@ pub async fn run(
     // The run's default deadline: an explicit config wins, then the scenario's own
     // `timeout:`; `None` keeps the transport default. A request's own timeout
     // still beats both, because the transport checks the request first.
-    let mut sender_config = ClientConfig::default();
+    let mut sender_config = config.client.clone();
     if let Some(timeout) = config.request_timeout.or(config.scenario.timeout) {
         sender_config.request_timeout = Some(timeout);
     }

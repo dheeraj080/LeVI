@@ -95,6 +95,25 @@ impl Redactor {
         out
     }
 
+    /// Replace every known secret value in a byte body with [`MASK`].
+    ///
+    /// This is what keeps a binary response from being the one path that skips
+    /// redaction: a PNG that happens to embed a token is still a response body that
+    /// must not cross the protocol boundary verbatim.
+    pub fn redact_bytes(&self, input: &[u8]) -> Vec<u8> {
+        let mut out = input.to_vec();
+        let mut secrets: Vec<&[u8]> = self
+            .secrets
+            .iter()
+            .map(|secret| secret.as_bytes())
+            .collect();
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        for secret in secrets {
+            out = replace_bytes(&out, secret, MASK.as_bytes());
+        }
+        out
+    }
+
     /// Redact a header value: mask it entirely if the header is sensitive,
     /// otherwise scrub any secret content from it.
     pub fn redact_header_value(&self, name: &str, value: &str) -> String {
@@ -104,6 +123,29 @@ impl Redactor {
             self.redact(value)
         }
     }
+}
+
+/// Replace every non-overlapping occurrence of `needle` in `haystack`.
+///
+/// Kept local because the only caller works on bytes: `str::replace` cannot say
+/// what to do with a non-UTF-8 body.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return haystack.to_vec();
+    }
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut cursor = 0;
+    while let Some(offset) = haystack[cursor..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let start = cursor + offset;
+        out.extend_from_slice(&haystack[cursor..start]);
+        out.extend_from_slice(replacement);
+        cursor = start + needle.len();
+    }
+    out.extend_from_slice(&haystack[cursor..]);
+    out
 }
 
 #[cfg(test)]
@@ -152,5 +194,18 @@ mod tests {
     fn ignores_empty_secrets() {
         let redactor = Redactor::with_secrets([""]);
         assert_eq!(redactor.redact("nothing to hide"), "nothing to hide");
+    }
+
+    #[test]
+    fn scrubs_secrets_from_a_binary_body() {
+        let redactor = Redactor::with_secrets(["s3cr3t"]);
+        let input = b"\x89PNG\x00s3cr3t\xff";
+        let output = redactor.redact_bytes(input);
+        assert!(!output.windows(6).any(|window| window == b"s3cr3t"));
+        assert!(output.starts_with(b"\x89PNG\x00"));
+        assert!(output.ends_with(b"\xff"));
+        assert!(output
+            .windows(MASK.len())
+            .any(|window| window == MASK.as_bytes()));
     }
 }

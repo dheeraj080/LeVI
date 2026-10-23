@@ -16,6 +16,7 @@ path = "src/main.rs"
 lev-core = { version = "0.0.0", path = "../lev-core" }
 lev-engine = { version = "0.0.0", path = "../lev-engine" }
 lev-format = { version = "0.0.0", path = "../lev-format" }
+lev-http = { version = "0.0.0", path = "../lev-http" }
 lev-load = { version = "0.0.0", path = "../lev-load" }
 lev-metrics = { version = "0.0.0", path = "../lev-metrics" }
 lev-protocol = { version = "0.0.0", path = "../lev-protocol" }

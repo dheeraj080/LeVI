@@ -12,17 +12,23 @@
 
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
+use hyper::header::{
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, COOKIE,
+    LOCATION, SET_COOKIE, USER_AGENT,
+};
 use hyper::{Request, Response as HyperResponse};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use url::Url;
 
 use lev_core::{Method, PreparedRequest};
 
 use crate::config::ClientConfig;
 use crate::connector::{measuring, TimedHttpsConnector};
+use crate::cookies::CookieJar;
 use crate::error::HttpError;
 use crate::timing::Timings;
 
@@ -33,6 +39,7 @@ type RequestBody = Full<Bytes>;
 pub struct HttpClient {
     client: Client<Connector, RequestBody>,
     config: ClientConfig,
+    cookies: Option<CookieJar>,
 }
 
 /// A fully buffered response, with timing. Interactive path only.
@@ -47,6 +54,8 @@ pub struct Response {
     /// earlier attempt failed transiently and the client asked again. The timings
     /// describe *this* attempt — the waits between attempts are not server latency.
     pub attempts: u32,
+    /// How many redirects this response followed before it was reported.
+    pub redirects: u32,
 }
 
 /// A load-mode response: the status and body length, never the body.
@@ -57,11 +66,24 @@ pub struct LoadResponse {
     pub status: u16,
     pub body_len: u64,
     pub timings: Timings,
+    pub redirects: u32,
+}
+
+/// The outcome of one attempt, before it is shaped into an interactive or load
+/// response.
+struct Exchange {
+    status: u16,
+    version: String,
+    headers: Vec<(String, String)>,
+    body: Option<Bytes>,
+    body_len: u64,
+    timings: Timings,
+    redirects: u32,
 }
 
 impl HttpClient {
     /// Build a client with the default [`ClientConfig`]: bounded connect, bounded
-    /// request, pooled connections with a finite idle life.
+    /// request, redirects and cookies on, pooled connections with a finite idle life.
     pub fn new() -> Result<Self, HttpError> {
         Self::with_config(ClientConfig::default())
     }
@@ -73,7 +95,8 @@ impl HttpClient {
     /// deadline that matters is the one the request carries, falling back to the
     /// config's.
     pub fn with_config(config: ClientConfig) -> Result<Self, HttpError> {
-        let connector = TimedHttpsConnector::new(config.connect_timeout)?;
+        let connector =
+            TimedHttpsConnector::new(config.connect_timeout, &config.tls, config.proxy.as_ref())?;
 
         let mut builder = Client::builder(TokioExecutor::new());
         builder.pool_idle_timeout(config.pool_idle_timeout);
@@ -81,7 +104,12 @@ impl HttpClient {
             builder.pool_max_idle_per_host(max_idle);
         }
         let client = builder.build(connector);
-        Ok(Self { client, config })
+        let cookies = config.cookie_jar.then(CookieJar::new);
+        Ok(Self {
+            client,
+            config,
+            cookies,
+        })
     }
 
     /// The config this client was built with.
@@ -135,7 +163,7 @@ impl HttpClient {
         }
     }
 
-    /// One attempt: build, send, buffer, and time the exchange.
+    /// One attempt: follow redirects, send, buffer, and time the exchange.
     ///
     /// The response carries `attempt`, so a retry ends up reported instead of being
     /// presented as one slow request.
@@ -144,51 +172,20 @@ impl HttpClient {
         request: PreparedRequest,
         attempt: u32,
     ) -> Result<Response, HttpError> {
-        let deadline = self.deadline_for(&request);
-        tracing::debug!(method = request.method.as_str(), attempt, "sending request");
-        let outgoing = build_request(request)?;
-
-        let start = Instant::now();
-        let exchange = async {
-            let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
-            let ttfb = start.elapsed();
-
-            let (parts, incoming) = response.into_parts();
-            let collected = incoming
-                .collect()
-                .await
-                .map_err(|error| HttpError::Body(error.to_string()))?;
-            Ok::<_, HttpError>((parts, collected.to_bytes(), ttfb))
-        };
-        // Wrapped, not awaited directly: the connector records the phases of the
-        // connection this request opens *into this task's cell*, which is the only
-        // way they can be attributed to the request that opened it.
-        let (exchanged, phases) = measuring(await_deadline(exchange, deadline)).await;
-        let (parts, body, ttfb) = exchanged?;
-        let total = start.elapsed();
-
-        let headers = parts
-            .headers
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_string(),
-                    value.to_str().unwrap_or("<binary>").to_string(),
-                )
-            })
-            .collect();
-
+        let exchange = self.execute(request, attempt, true).await?;
         let response = Response {
-            status: parts.status.as_u16(),
-            version: format!("{:?}", parts.version),
-            headers,
-            body,
-            timings: timings_since(ttfb, total, phases),
+            status: exchange.status,
+            version: exchange.version,
+            headers: exchange.headers,
+            body: exchange.body.unwrap_or_default(),
+            timings: exchange.timings,
             attempts: attempt,
+            redirects: exchange.redirects,
         };
         tracing::debug!(
             status = response.status,
             attempts = response.attempts,
+            redirects = response.redirects,
             total_ms = response.timings.total.as_millis() as u64,
             "request answered"
         );
@@ -279,71 +276,267 @@ impl HttpClient {
         &self,
         request: PreparedRequest,
     ) -> Result<LoadResponse, HttpError> {
-        let deadline = self.deadline_for(&request);
-        let outgoing = build_request(request)?;
-
-        let start = Instant::now();
-        let exchange = async {
-            let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
-            let ttfb = start.elapsed();
-
-            let (parts, mut incoming) = response.into_parts();
-            let mut body_len: u64 = 0;
-            while let Some(frame) = incoming.frame().await {
-                let frame = frame.map_err(|error| HttpError::Body(error.to_string()))?;
-                if let Some(chunk) = frame.data_ref() {
-                    body_len += chunk.len() as u64;
-                }
-            }
-            Ok::<_, HttpError>((parts, body_len, ttfb))
-        };
-        let (exchanged, phases) = measuring(await_deadline(exchange, deadline)).await;
-        let (parts, body_len, ttfb) = exchanged?;
-        let total = start.elapsed();
-
+        let exchange = self.execute(request, 1, false).await?;
         Ok(LoadResponse {
-            status: parts.status.as_u16(),
-            body_len,
-            timings: timings_since(ttfb, total, phases),
+            status: exchange.status,
+            body_len: exchange.body_len,
+            timings: exchange.timings,
+            redirects: exchange.redirects,
         })
     }
 
     /// The deadline for one send: the request's own timeout if it has one, else the
     /// client default. `None` means unbounded (test-only; see [`ClientConfig`]).
-    fn deadline_for(&self, request: &PreparedRequest) -> Option<std::time::Duration> {
+    fn deadline_for(&self, request: &PreparedRequest) -> Option<Duration> {
         request.timeout.or(self.config.request_timeout)
+    }
+
+    /// The one exchange loop: redirect, cookie, decode, time.
+    ///
+    /// `keep_body` is the difference between the interactive and load paths. When it
+    /// is false the body is streamed through a counter and dropped, and compression is
+    /// not advertised, so the reported byte count is wire traffic.
+    async fn execute(
+        &self,
+        request: PreparedRequest,
+        attempt: u32,
+        keep_body: bool,
+    ) -> Result<Exchange, HttpError> {
+        let timeout = self.deadline_for(&request);
+        let deadline = timeout.map(|timeout| (timeout, Instant::now() + timeout));
+        tracing::debug!(method = request.method.as_str(), attempt, "sending request");
+
+        let mut method = request.method;
+        let mut url = request.url;
+        let mut headers = request.headers;
+        let mut request_body = request.body;
+        let mut redirects = 0u32;
+        let mut totals = Timings::default();
+
+        loop {
+            let outgoing = build_request(
+                &method,
+                &url,
+                &headers,
+                request_body.clone(),
+                &self.config,
+                self.cookies.as_ref(),
+                keep_body && self.config.compression,
+            )?;
+
+            let start = Instant::now();
+            let exchange = async {
+                let response: HyperResponse<Incoming> = self.client.request(outgoing).await?;
+                let ttfb = start.elapsed();
+
+                let (parts, incoming) = response.into_parts();
+                let (body, body_len) =
+                    read_body(incoming, keep_body, self.config.max_response_bytes).await?;
+                Ok::<_, HttpError>((parts, body, body_len, ttfb))
+            };
+
+            // The remaining time, not a fresh budget per hop: a redirect is part of
+            // the same request, and a chain that never finishes must not reset its
+            // own deadline ten times.
+            let budget = match deadline {
+                Some((timeout, at)) => {
+                    let remaining = at.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(HttpError::Timeout { timeout });
+                    }
+                    Some((timeout, remaining))
+                }
+                None => None,
+            };
+            let (exchanged, phases) = measuring(await_deadline(exchange, budget)).await;
+            let (mut parts, mut buffered, mut body_len, ttfb) = exchanged?;
+            let total = start.elapsed();
+            totals = merge_timings(totals, timings_since(ttfb, total, phases));
+
+            if let Some(jar) = &self.cookies {
+                if let Ok(parsed) = Url::parse(&url) {
+                    jar.store_headers(&parsed, parts.headers.get_all(SET_COOKIE).iter());
+                }
+            }
+
+            let status = parts.status.as_u16();
+            let location = parts
+                .headers
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+
+            if self.config.follow_redirects && is_redirect(status) {
+                if let Some(location) = location {
+                    if redirects >= self.config.max_redirects {
+                        return Err(HttpError::TooManyRedirects {
+                            max: self.config.max_redirects,
+                        });
+                    }
+                    let next_url = resolve_location(&url, &location)?;
+                    let next_method = redirected_method(status, &method);
+                    if matches!(next_method, Method::Get | Method::Head) {
+                        request_body.clear();
+                        strip_entity_headers(&mut headers);
+                    }
+                    if !same_origin(&url, &next_url) {
+                        strip_credentials(&mut headers);
+                    }
+                    tracing::debug!(
+                        status,
+                        redirects = redirects + 1,
+                        from = %redacted_url(&url),
+                        to = %redacted_url(&next_url),
+                        "following redirect"
+                    );
+                    method = next_method;
+                    url = next_url;
+                    redirects += 1;
+                    continue;
+                }
+            }
+
+            if keep_body && self.config.compression {
+                if let Some(encoding) = parts
+                    .headers
+                    .get(CONTENT_ENCODING)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+                {
+                    let raw = buffered.take().unwrap_or_default();
+                    let decoded =
+                        crate::encoding::decode(&encoding, raw, self.config.max_response_bytes)?;
+                    if let Some(limit) = self.config.max_response_bytes {
+                        if decoded.len() as u64 > limit {
+                            return Err(HttpError::ResponseTooLarge { limit });
+                        }
+                    }
+                    body_len = decoded.len() as u64;
+                    buffered = Some(decoded);
+                    // The body the caller receives is decoded; leaving the header
+                    // would claim otherwise and make a second decode look correct.
+                    parts.headers.remove(CONTENT_ENCODING);
+                    parts.headers.remove(CONTENT_LENGTH);
+                }
+            }
+
+            let headers = parts
+                .headers
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_string(),
+                        value.to_str().unwrap_or("<binary>").to_string(),
+                    )
+                })
+                .collect();
+
+            return Ok(Exchange {
+                status,
+                version: format!("{:?}", parts.version),
+                headers,
+                body: buffered,
+                body_len,
+                timings: totals,
+                redirects,
+            });
+        }
     }
 }
 
-/// Run one exchange under an optional deadline.
+/// Run one exchange under an optional `(reported timeout, remaining time)` pair.
 async fn await_deadline<T>(
     exchange: impl std::future::Future<Output = Result<T, HttpError>>,
-    deadline: Option<std::time::Duration>,
+    deadline: Option<(Duration, Duration)>,
 ) -> Result<T, HttpError> {
     match deadline {
-        Some(timeout) => tokio::time::timeout(timeout, exchange)
+        Some((timeout, remaining)) => tokio::time::timeout(remaining, exchange)
             .await
             .map_err(|_| HttpError::Timeout { timeout })?,
         None => exchange.await,
     }
 }
 
-/// Turn a prepared request into a hyper request. Shared by both send paths.
-fn build_request(request: PreparedRequest) -> Result<Request<RequestBody>, HttpError> {
-    let uri = request
-        .url
-        .parse::<hyper::Uri>()
-        .map_err(|_| HttpError::InvalidUrl(request.url.clone()))?;
-    let method = hyper::Method::from_bytes(request.method.as_str().as_bytes())
-        .map_err(|_| HttpError::InvalidMethod(request.method.as_str().to_string()))?;
-
-    let mut builder = Request::builder().method(method).uri(uri);
-    for (name, value) in &request.headers {
-        builder = builder.header(name.as_str(), value.as_str());
+/// Read an incoming body, either buffering it under a limit or only counting it.
+async fn read_body(
+    mut incoming: Incoming,
+    keep: bool,
+    limit: Option<u64>,
+) -> Result<(Option<Bytes>, u64), HttpError> {
+    let mut buffer = keep.then(BytesMut::new);
+    let mut body_len = 0u64;
+    while let Some(frame) = incoming.frame().await {
+        let frame = frame.map_err(|error| HttpError::Body(error.to_string()))?;
+        if let Some(chunk) = frame.data_ref() {
+            body_len += chunk.len() as u64;
+            if let (Some(limit), Some(_)) = (limit, &buffer) {
+                if body_len > limit {
+                    return Err(HttpError::ResponseTooLarge { limit });
+                }
+            }
+            if let Some(buffer) = &mut buffer {
+                buffer.extend_from_slice(chunk);
+            }
+        }
     }
-    builder
-        .body(Full::new(Bytes::from(request.body)))
-        .map_err(|error| HttpError::InvalidHeader(error.to_string()))
+    Ok((buffer.map(BytesMut::freeze), body_len))
+}
+
+/// Turn a prepared request into a hyper request. Shared by both send paths.
+fn build_request(
+    method: &Method,
+    url: &str,
+    headers: &[(String, String)],
+    body: Vec<u8>,
+    config: &ClientConfig,
+    cookies: Option<&CookieJar>,
+    advertise_compression: bool,
+) -> Result<Request<RequestBody>, HttpError> {
+    let uri = url
+        .parse::<hyper::Uri>()
+        .map_err(|_| HttpError::InvalidUrl(url.to_string()))?;
+    let method = hyper::Method::from_bytes(method.as_str().as_bytes())
+        .map_err(|_| HttpError::InvalidMethod(method.as_str().to_string()))?;
+
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| HttpError::InvalidHeader(name.clone()))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| HttpError::InvalidHeader(format!("{name}: {value}")))?;
+        map.append(name, value);
+    }
+
+    if advertise_compression && !map.contains_key(ACCEPT_ENCODING) {
+        map.insert(
+            ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip, deflate, br"),
+        );
+    }
+    if !map.contains_key(USER_AGENT) {
+        if let Some(user_agent) = &config.user_agent {
+            if let Ok(value) = HeaderValue::from_str(user_agent) {
+                map.insert(USER_AGENT, value);
+            }
+        }
+    }
+    if !map.contains_key(COOKIE) {
+        if let Some(jar) = cookies {
+            if let Ok(parsed) = Url::parse(url) {
+                if let Some(cookie) = jar.header_for(&parsed) {
+                    if let Ok(value) = HeaderValue::from_str(&cookie) {
+                        map.insert(COOKIE, value);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut request = Request::new(Full::new(Bytes::from(body)));
+    *request.method_mut() = method;
+    *request.uri_mut() = uri;
+    *request.headers_mut() = map;
+    Ok(request)
 }
 
 /// Assemble the timings of one attempt.
@@ -361,6 +554,93 @@ fn timings_since(
         ttfb,
         receive: total.saturating_sub(ttfb),
         ..phases.unwrap_or_default()
+    }
+}
+
+/// Add the timings of one redirect hop to the exchange's total.
+///
+/// Wall-clock phases add; connection phases add only when both hops reported one,
+/// because `None` means "this hop reused a connection", not zero.
+fn merge_timings(mut into: Timings, next: Timings) -> Timings {
+    into.total += next.total;
+    into.ttfb += next.ttfb;
+    into.receive += next.receive;
+    into.dns = sum_optional(into.dns, next.dns);
+    into.connect = sum_optional(into.connect, next.connect);
+    into.tls = sum_optional(into.tls, next.tls);
+    into
+}
+
+fn sum_optional(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// How a redirect changes the method, following the common browser/client rules.
+fn redirected_method(status: u16, method: &Method) -> Method {
+    match status {
+        303 if !matches!(method, Method::Head) => Method::Get,
+        301 | 302 if !matches!(method, Method::Get | Method::Head) => Method::Get,
+        _ => method.clone(),
+    }
+}
+
+/// Resolve a `Location` value against the URL that produced it.
+fn resolve_location(current: &str, location: &str) -> Result<String, HttpError> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        Url::parse(location)
+            .map_err(|error| HttpError::InvalidRedirect(format!("`{location}`: {error}")))?;
+        return Ok(location.to_string());
+    }
+    let base = Url::parse(current)
+        .map_err(|error| HttpError::InvalidRedirect(format!("`{current}`: {error}")))?;
+    let next = base
+        .join(location)
+        .map_err(|error| HttpError::InvalidRedirect(format!("`{location}`: {error}")))?;
+    Ok(next.to_string())
+}
+
+fn same_origin(left: &str, right: &str) -> bool {
+    let (Ok(left), Ok(right)) = (Url::parse(left), Url::parse(right)) else {
+        return false;
+    };
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+/// Drop headers that describe a request body that is no longer being sent.
+fn strip_entity_headers(headers: &mut Vec<(String, String)>) {
+    headers.retain(|(name, _)| {
+        !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "content-type" | "content-length" | "transfer-encoding" | "content-encoding"
+        )
+    });
+}
+
+/// Never carry credentials or a session cookie to another origin.
+fn strip_credentials(headers: &mut Vec<(String, String)>) {
+    headers.retain(|(name, _)| {
+        !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "authorization" | "cookie" | "proxy-authorization" | "host"
+        )
+    });
+}
+
+/// A URL with its query removed, for a debug line. A query can carry a token.
+fn redacted_url(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _)) => format!("{base}?<redacted>"),
+        None => url.to_string(),
     }
 }
 
@@ -468,5 +748,37 @@ mod tests {
         for status in [429, 502, 503, 504] {
             assert!(is_transient_status(status), "{status}");
         }
+    }
+
+    #[test]
+    fn a_redirect_resolves_a_relative_location() {
+        assert_eq!(
+            resolve_location("https://api.test/v1/orders", "/v2/orders").unwrap(),
+            "https://api.test/v2/orders"
+        );
+        assert_eq!(
+            resolve_location("https://api.test/v1/orders", "detail").unwrap(),
+            "https://api.test/v1/detail"
+        );
+    }
+
+    #[test]
+    fn the_usual_redirect_method_rules_hold() {
+        assert_eq!(
+            redirected_method(303, &Method::Post),
+            Method::Get,
+            "303 says GET"
+        );
+        assert_eq!(redirected_method(303, &Method::Head), Method::Head);
+        assert_eq!(redirected_method(307, &Method::Post), Method::Post);
+        assert_eq!(redirected_method(308, &Method::Put), Method::Put);
+        assert_eq!(redirected_method(302, &Method::Get), Method::Get);
+    }
+
+    #[test]
+    fn a_cross_origin_redirect_drops_credentials() {
+        assert!(!same_origin("https://api.test/a", "https://evil.test/b"));
+        assert!(same_origin("https://api.test/a", "https://api.test:443/b"));
+        assert!(!same_origin("http://api.test/a", "https://api.test/b"));
     }
 }

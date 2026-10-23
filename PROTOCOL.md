@@ -1,8 +1,9 @@
 # Levi wire protocol - v0
 
 **Status: frozen v0** (Phase 1; **v0.2** adds scripting in Phase 2; **v0.3** adds
-per-request deadlines). Until v1 the rules below may only be changed in
-backwards-compatible ways. The crate that implements this is `lev-protocol`.
+per-request deadlines; **v0.4** adds multipart/GraphQL bodies and binary responses).
+Until v1 the rules below may only be changed in backwards-compatible ways. The crate
+that implements this is `lev-protocol`.
 
 > **v0.2 (minor):** `sendRequest.request` gains optional `scripts` and `assertions`;
 > `requestResult` gains optional `checks` and `logs`. All four are additive, so a v0.1
@@ -12,6 +13,11 @@ backwards-compatible ways. The crate that implements this is `lev-protocol`.
 > **v0.3 (minor):** `sendRequest.request` gains the optional `timeoutMs` deadline in
 > milliseconds. Absent means "use the engine's default request timeout" — never
 > "unbounded". Additive; see §9.
+>
+> **v0.4 (minor):** `sendRequest.request.body` gains the `multipart` and `graphql`
+> kinds, and `requestResult.response` gains optional `bodyBase64` for bodies that are
+> not valid UTF-8. Additive for peers that negotiate down; a peer that only speaks
+> v0.3 must not receive the new body kinds. See §10.
 
 ## 1. Why one protocol
 
@@ -74,7 +80,7 @@ first message must be `hello`, and anything else is `badMessage` and the session
 ### `hello`
 
 ```json
-{ "type": "hello", "protocolVersion": { "major": 0, "minor": 3 },
+{ "type": "hello", "protocolVersion": { "major": 0, "minor": 4 },
   "capabilities": ["interactive"] }
 ```
 
@@ -87,7 +93,7 @@ advertisement in `ready` the day one of them is optional.
 ### `ready`
 
 ```json
-{ "type": "ready", "version": { "major": 0, "minor": 3 }, "engine": "0.0.0" }
+{ "type": "ready", "version": { "major": 0, "minor": 4 }, "engine": "0.0.0" }
 ```
 
 ### `sendRequest`
@@ -127,8 +133,11 @@ them. `env.vars` is the already-merged `collection < environment` scope; `baseUr
 (`baseUrl` resolves a relative request URL; request-level auth wins).
 
 Body kinds: `json { content }`, `form { fields: [{ name, value }] }`,
-`raw { contentType?, content }`, `file { path }`, and (v0.3) `bytes { contentType?,
-base64 }`.
+`multipart { parts: [{ name, value?, file?, filename?, contentType?, base64? }] }`
+and `graphql { query, variables?, operationName? }` (v0.4), `raw { contentType?,
+content }`, `file { path }`, and (v0.3) `bytes { contentType?, base64 }`. A multipart part
+carries exactly one of `value`, `file` or `base64`; the CLI resolves a `file` part to
+`base64` before sending, so the engine never opens a path itself.
 
 Auth kinds: `bearer { token }`, `basic { username, password }`,
 `apiKey { name, value, location }` where `location` is `header` (default) or `query`.
@@ -193,6 +202,12 @@ exits `1`).
 `request` is the request **as actually sent** - resolved, and redacted. This is what a
 UI renders as "what went out", and it never contains a secret. The echo is computed
 *after* the pre-request script, so it reflects any rewrite the script made.
+
+`response.body` is the body decoded as UTF-8 (lossy) and scrubbed of known secrets.
+When the raw bytes are not valid UTF-8, `bodyBase64` carries the same scrubbed bytes
+base64-encoded, so a binary response can be displayed or saved without passing through
+a lossy string. `bodyBase64` is absent when the body is valid UTF-8; `bodyLen` is
+always the raw byte length.
 
 `timings` carries milliseconds. `dnsMs`, `connectMs` and `tlsMs` describe the
 **connection** rather than the request, so they are present only when this request opened
@@ -302,7 +317,7 @@ exists. The envelope is already designed to carry them.
 | `requestResult.checks` | engine -> client | assertion + `lev.test` outcomes, redacted |
 | `requestResult.logs` | engine -> client | `lev.log` lines, redacted |
 
-`PROTOCOL_VERSION` moved to `0.2` in this bump (`0.3` today — see §9). A script failure is
+`PROTOCOL_VERSION` moved to `0.2` in this bump (`0.4` today — see §10). A script failure is
 reported as `error` with `code: "config"` — no new error code was introduced.
 
 ## 9. Changes in v0.3
@@ -313,7 +328,8 @@ reported as `error` with `code: "config"` — no new error code was introduced.
 | `sendRequest.request.body` | client -> engine | gains the `bytes` kind: `{ "kind": "bytes", "contentType"?, "base64" }` |
 | `requestResult.response.attempts` | engine -> client | how many sends it took; absent = 1 |
 
-`PROTOCOL_VERSION` is `0.3`. A deadline that expires is reported as `error` with
+`PROTOCOL_VERSION` moved to `0.3` in this bump (`0.4` today — see §10). A deadline that
+expires is reported as `error` with
 `code: "engine"` (the target failed to answer, not the request definition) — no new
 error code was introduced. Engines that predate v0.3 ignore the field and apply their
 own default, which is still bounded.
@@ -329,3 +345,24 @@ knows the collection, and the side a user is watching — so an engine can run w
 collection is checked out. The `file` kind stays in the protocol for a later agent that
 can confine paths to a root of its own; until then a `file` body that reaches an engine
 is refused, because the engine cannot tell a fixture from `/etc/passwd`.
+
+## 10. Changes in v0.4
+
+| Field | Direction | Meaning |
+|---|---|---|
+| `sendRequest.request.body` | client -> engine | gains `multipart` and `graphql` kinds |
+| `requestResult.response.bodyBase64` | engine -> client | body bytes, base64-encoded, when the body is not valid UTF-8 |
+
+`PROTOCOL_VERSION` is `0.4`. Both additions are optional on the wire, but a v0.4
+client that negotiates down to a v0.3 engine must not send the new body kinds: that
+engine's tagged body union has no variant for them.
+
+A multipart part carries exactly one of `value`, `file` or `base64`. The CLI resolves
+`file` to `base64` before sending, so the engine still needs no filesystem access.
+GraphQL is sent as the standard `{ "query", "variables", "operationName" }` JSON
+envelope, with `application/json`.
+
+`bodyBase64` is present only when the response bytes are not valid UTF-8. It is
+redacted exactly like `body`, which means the bytes a client receives may differ in
+length from `bodyLen` (the raw response length). The redaction is deliberate: a token
+embedded in a binary body must not become the one path around the redactor.

@@ -10,7 +10,7 @@ of thousands of times per second for a load run.
 > **Status: Phase 3 (load testing).** The engine is built as a standalone
 > Rust CLI first, per the build plan. `levi request` works end to end *through the
 > protocol boundary*, with real HTTP, per-phase timing, and secrets redacted inside the
-> engine; `levi serve --stdio` speaks the same protocol over NDJSON. Protocol v0.3 is
+> engine; `levi serve --stdio` speaks the same protocol over NDJSON. Protocol v0.4 is
 > frozen - see [`PROTOCOL.md`](PROTOCOL.md). Requests may carry JavaScript pre/post hooks
 > and declarative assertions, run in a sandboxed QuickJS runtime with a CPU budget and a
 > memory limit; a runaway script fails one request and never hangs the run. `levi run`

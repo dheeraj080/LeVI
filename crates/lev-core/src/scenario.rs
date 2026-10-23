@@ -17,19 +17,22 @@ use crate::threshold::{Threshold, ThresholdMetric};
 
 /// How a scenario drives load.
 ///
-/// Slice 1 ships the **closed** model only ([`ConstantVus`]): a fixed pool of virtual
-/// users that each loop their steps for a fixed duration. The open model
-/// (`ConstantRate` / `RampingRate`), ramps and staged timelines arrive in later slices.
-///
-/// [`ConstantVus`]: Executor::ConstantVus
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Supports closed and open models:
+/// - `ConstantVus` for a fixed pool of virtual users looping steps
+/// - `ConstantRate` for a constant arrival rate of new iterations
+/// - `RampingRate` for a ramping arrival rate
+#[derive(Debug, Clone, PartialEq)]
 pub enum Executor {
     /// A fixed pool of virtual users, each looping its steps for a fixed duration.
-    ///
-    /// A virtual user is **not** a thread: it is a logical async task with its own
-    /// identity and seeded RNG. Many VUs multiplex onto few worker threads, which is
-    /// what makes thousands of VUs fit in a few hundred megabytes.
     ConstantVus { vus: u32, duration: Duration },
+    /// A constant arrival rate (iterations per second).
+    ConstantRate { rate: f64, duration: Duration },
+    /// A ramping arrival rate (start to end rate over duration).
+    RampingRate {
+        start_rate: f64,
+        end_rate: f64,
+        duration: Duration,
+    },
 }
 
 impl Executor {
@@ -37,6 +40,8 @@ impl Executor {
     pub fn duration(&self) -> Duration {
         match self {
             Executor::ConstantVus { duration, .. } => *duration,
+            Executor::ConstantRate { duration, .. } => *duration,
+            Executor::RampingRate { duration, .. } => *duration,
         }
     }
 
@@ -44,6 +49,7 @@ impl Executor {
     pub fn max_vus(&self) -> u32 {
         match self {
             Executor::ConstantVus { vus, .. } => *vus,
+            Executor::ConstantRate { .. } | Executor::RampingRate { .. } => 0,
         }
     }
 }

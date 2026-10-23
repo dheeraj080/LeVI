@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use lev_core::{
     base64_decode, base64_encode, ApiKeyLocation, Assertion, Auth, Body, Collection, Executor,
-    Method, RequestDef, Scenario, Scripts, SecretName, Step, Template, Threshold, ThresholdMetric,
-    VarSet, VarValue,
+    Method, MultipartPart, MultipartValue, RequestDef, Scenario, Scripts, SecretName, Step,
+    Template, Threshold, ThresholdMetric, VarSet, VarValue,
 };
 
 use crate::dto::{
-    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, BytesBodyDto, CollectionDto, ConstantVusDto,
-    DurationDto, ExecutorDto, FormFieldDto, HeaderAssertionDto, HeaderDto, JsonPathAssertionDto,
+    ApiKeyLocationDto, AssertionDto, AuthDto, BodyDto, BytesBodyDto, CollectionDto,
+    ConstantRateDto, ConstantVusDto, DurationDto, ExecutorDto, FormFieldDto, GraphqlBodyDto,
+    HeaderAssertionDto, HeaderDto, JsonPathAssertionDto, MultipartPartDto, RampingRateDto,
     RawBodyDto, RequestDto, ScenarioDto, ScriptsDto, StepDto, VarValueDto,
 };
 use crate::error::FormatError;
@@ -232,6 +233,12 @@ fn body_to_core(dto: Option<BodyDto>) -> Result<Body, FormatError> {
                 .map(|field| (field.name, field.value))
                 .collect(),
         ),
+        Some(BodyDto::Multipart { multipart }) => Body::Multipart(multipart_to_core(multipart)?),
+        Some(BodyDto::Graphql { graphql }) => Body::Graphql {
+            query: graphql.query,
+            variables: graphql.variables,
+            operation_name: graphql.operation_name,
+        },
         Some(BodyDto::Raw { raw }) => Body::Raw {
             content_type: raw.content_type,
             content: raw.content,
@@ -259,6 +266,59 @@ fn body_from_core(body: &Body) -> Option<BodyDto> {
                 })
                 .collect(),
         }),
+        Body::Multipart(parts) => Some(BodyDto::Multipart {
+            multipart: parts
+                .iter()
+                .map(|part| {
+                    let (value, file, filename, content_type, base64) = match &part.value {
+                        MultipartValue::Text(value) => {
+                            (Some(value.clone()), None, None, None, None)
+                        }
+                        MultipartValue::File {
+                            path,
+                            filename,
+                            content_type,
+                        } => (
+                            None,
+                            Some(path.source().to_string()),
+                            filename.clone(),
+                            content_type.clone(),
+                            None,
+                        ),
+                        MultipartValue::Bytes {
+                            filename,
+                            content_type,
+                            content,
+                        } => (
+                            None,
+                            None,
+                            Some(filename.clone()),
+                            content_type.clone(),
+                            Some(base64_encode(content)),
+                        ),
+                    };
+                    MultipartPartDto {
+                        name: part.name.clone(),
+                        value,
+                        file,
+                        filename,
+                        content_type,
+                        base64,
+                    }
+                })
+                .collect(),
+        }),
+        Body::Graphql {
+            query,
+            variables,
+            operation_name,
+        } => Some(BodyDto::Graphql {
+            graphql: GraphqlBodyDto {
+                query: query.clone(),
+                variables: variables.clone(),
+                operation_name: operation_name.clone(),
+            },
+        }),
         Body::Raw {
             content_type,
             content,
@@ -283,26 +343,92 @@ fn body_from_core(body: &Body) -> Option<BodyDto> {
     }
 }
 
+fn multipart_to_core(parts: Vec<MultipartPartDto>) -> Result<Vec<MultipartPart>, FormatError> {
+    parts
+        .into_iter()
+        .map(|part| {
+            if part.name.trim().is_empty() {
+                return Err(FormatError::InvalidBody(
+                    "a multipart part needs a non-empty `name`".to_string(),
+                ));
+            }
+            let chosen = [
+                part.value.is_some(),
+                part.file.is_some(),
+                part.base64.is_some(),
+            ]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+            if chosen != 1 {
+                return Err(FormatError::InvalidBody(format!(
+                    "multipart part `{}` takes exactly one of `value`, `file`, `base64`",
+                    part.name
+                )));
+            }
+            let value = if let Some(value) = part.value {
+                MultipartValue::Text(value)
+            } else if let Some(file) = part.file {
+                MultipartValue::File {
+                    path: Template::parse(&file)?,
+                    filename: part.filename,
+                    content_type: part.content_type,
+                }
+            } else {
+                let base64 = part.base64.unwrap_or_default();
+                MultipartValue::Bytes {
+                    filename: part.filename.unwrap_or_else(|| "blob".to_string()),
+                    content_type: part.content_type,
+                    content: base64_decode(&base64)?,
+                }
+            };
+            Ok(MultipartPart {
+                name: part.name,
+                value,
+            })
+        })
+        .collect()
+}
+
 // ---- scenario ----
 
 pub fn scenario_to_core(dto: ScenarioDto) -> Result<Scenario, FormatError> {
-    let executor = match dto.executor.constant_vus {
-        Some(constant_vus) => {
-            if constant_vus.vus == 0 {
-                return Err(FormatError::InvalidScenario(
-                    "executor `constantVus.vus` must be at least 1".to_string(),
-                ));
-            }
-            Executor::ConstantVus {
-                vus: constant_vus.vus,
-                duration: duration_to_core(&constant_vus.duration)?,
-            }
-        }
-        None => {
+    let executor = if let Some(constant_vus) = dto.executor.constant_vus {
+        if constant_vus.vus == 0 {
             return Err(FormatError::InvalidScenario(
-                "no executor configured (expected `constantVus`)".to_string(),
-            ))
+                "executor `constantVus.vus` must be at least 1".to_string(),
+            ));
         }
+        Executor::ConstantVus {
+            vus: constant_vus.vus,
+            duration: duration_to_core(&constant_vus.duration)?,
+        }
+    } else if let Some(constant_rate) = dto.executor.constant_rate {
+        if constant_rate.rate <= 0.0 {
+            return Err(FormatError::InvalidScenario(
+                "executor `constantRate.rate` must be greater than 0".to_string(),
+            ));
+        }
+        Executor::ConstantRate {
+            rate: constant_rate.rate,
+            duration: duration_to_core(&constant_rate.duration)?,
+        }
+    } else if let Some(ramping_rate) = dto.executor.ramping_rate {
+        if ramping_rate.start_rate < 0.0 || ramping_rate.end_rate < 0.0 {
+            return Err(FormatError::InvalidScenario(
+                "executor `rampingRate` rates must be non-negative".to_string(),
+            ));
+        }
+        Executor::RampingRate {
+            start_rate: ramping_rate.start_rate,
+            end_rate: ramping_rate.end_rate,
+            duration: duration_to_core(&ramping_rate.duration)?,
+        }
+    } else {
+        return Err(FormatError::InvalidScenario(
+            "no executor configured (expected `constantVus`, `constantRate`, or `rampingRate`)"
+                .to_string(),
+        ));
     };
 
     let mut steps = Vec::with_capacity(dto.steps.len());
@@ -362,6 +488,29 @@ pub fn scenario_from_core(scenario: &Scenario) -> ScenarioDto {
         Executor::ConstantVus { vus, duration } => ExecutorDto {
             constant_vus: Some(ConstantVusDto {
                 vus: *vus,
+                duration: DurationDto::Text(format_duration(*duration)),
+            }),
+            constant_rate: None,
+            ramping_rate: None,
+        },
+        Executor::ConstantRate { rate, duration } => ExecutorDto {
+            constant_vus: None,
+            constant_rate: Some(ConstantRateDto {
+                rate: *rate,
+                duration: DurationDto::Text(format_duration(*duration)),
+            }),
+            ramping_rate: None,
+        },
+        Executor::RampingRate {
+            start_rate,
+            end_rate,
+            duration,
+        } => ExecutorDto {
+            constant_vus: None,
+            constant_rate: None,
+            ramping_rate: Some(RampingRateDto {
+                start_rate: *start_rate,
+                end_rate: *end_rate,
                 duration: DurationDto::Text(format_duration(*duration)),
             }),
         },

@@ -102,6 +102,41 @@ pub struct BytesBodyDto {
     pub base64: String,
 }
 
+/// One part of a `multipart` body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartPartDto {
+    pub name: String,
+    /// Text content. Exactly one of `value`, `file` or `base64` must be present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// A path, relative to the collection directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The filename sent to the server. Defaults to the path's file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// File bytes, written as base64 after a `file:` part has been resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base64: Option<String>,
+}
+
+/// The fields of a `graphql` body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphqlBodyDto {
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "operationName"
+    )]
+    pub operation_name: Option<String>,
+}
+
 /// Request body.
 ///
 /// Untagged, single-key form — the natural, git-friendly shape:
@@ -120,6 +155,8 @@ pub struct BytesBodyDto {
 pub enum BodyDto {
     Json { json: String },
     Form { form: Vec<FormFieldDto> },
+    Multipart { multipart: Vec<MultipartPartDto> },
+    Graphql { graphql: GraphqlBodyDto },
     Raw { raw: RawBodyDto },
     File { file: String },
     Bytes { bytes: BytesBodyDto },
@@ -133,6 +170,8 @@ pub enum BodyDto {
 struct BodyFields {
     json: Option<String>,
     form: Option<Vec<FormFieldDto>>,
+    multipart: Option<Vec<MultipartPartDto>>,
+    graphql: Option<GraphqlBodyDto>,
     raw: Option<RawBodyDto>,
     file: Option<String>,
     bytes: Option<BytesBodyDto>,
@@ -146,12 +185,14 @@ impl<'de> Deserialize<'de> for BodyDto {
         let BodyFields {
             json,
             form,
+            multipart,
+            graphql,
             raw,
             file,
             bytes,
         } = BodyFields::deserialize(deserializer)?;
 
-        let refused = |present: [Option<&str>; 5]| {
+        let refused = |present: [Option<&str>; 7]| {
             let present: Vec<&str> = present.into_iter().flatten().collect();
             let found = if present.is_empty() {
                 "found an empty body".to_string()
@@ -160,19 +201,26 @@ impl<'de> Deserialize<'de> for BodyDto {
                 format!("found {}", names.join(" and "))
             };
             <D::Error as serde::de::Error>::custom(format!(
-                "a body takes exactly one of `json`, `form`, `raw`, `file`, `bytes`; {found}"
+                "a body takes exactly one of `json`, `form`, `multipart`, `graphql`, `raw`, \
+                 `file`, `bytes`; {found}"
             ))
         };
 
-        match (json, form, raw, file, bytes) {
-            (Some(json), None, None, None, None) => Ok(BodyDto::Json { json }),
-            (None, Some(form), None, None, None) => Ok(BodyDto::Form { form }),
-            (None, None, Some(raw), None, None) => Ok(BodyDto::Raw { raw }),
-            (None, None, None, Some(file), None) => Ok(BodyDto::File { file }),
-            (None, None, None, None, Some(bytes)) => Ok(BodyDto::Bytes { bytes }),
-            (json, form, raw, file, bytes) => Err(refused([
+        match (json, form, multipart, graphql, raw, file, bytes) {
+            (Some(json), None, None, None, None, None, None) => Ok(BodyDto::Json { json }),
+            (None, Some(form), None, None, None, None, None) => Ok(BodyDto::Form { form }),
+            (None, None, Some(multipart), None, None, None, None) => {
+                Ok(BodyDto::Multipart { multipart })
+            }
+            (None, None, None, Some(graphql), None, None, None) => Ok(BodyDto::Graphql { graphql }),
+            (None, None, None, None, Some(raw), None, None) => Ok(BodyDto::Raw { raw }),
+            (None, None, None, None, None, Some(file), None) => Ok(BodyDto::File { file }),
+            (None, None, None, None, None, None, Some(bytes)) => Ok(BodyDto::Bytes { bytes }),
+            (json, form, multipart, graphql, raw, file, bytes) => Err(refused([
                 json.as_ref().map(|_| "json"),
                 form.as_ref().map(|_| "form"),
+                multipart.as_ref().map(|_| "multipart"),
+                graphql.as_ref().map(|_| "graphql"),
                 raw.as_ref().map(|_| "raw"),
                 file.as_ref().map(|_| "file"),
                 bytes.as_ref().map(|_| "bytes"),
@@ -316,6 +364,10 @@ pub enum DurationDto {
 pub struct ExecutorDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constant_vus: Option<ConstantVusDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constant_rate: Option<ConstantRateDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ramping_rate: Option<RampingRateDto>,
 }
 
 /// A fixed pool of virtual users run for a fixed duration.
@@ -323,6 +375,23 @@ pub struct ExecutorDto {
 #[serde(rename_all = "camelCase")]
 pub struct ConstantVusDto {
     pub vus: u32,
+    pub duration: DurationDto,
+}
+
+/// A constant arrival rate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConstantRateDto {
+    pub rate: f64,
+    pub duration: DurationDto,
+}
+
+/// A ramping arrival rate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RampingRateDto {
+    pub start_rate: f64,
+    pub end_rate: f64,
     pub duration: DurationDto,
 }
 

@@ -17,6 +17,21 @@ pub enum HttpError {
     #[error("tls setup failed: {0}")]
     Tls(String),
 
+    #[error("invalid proxy: {0}")]
+    InvalidProxy(String),
+
+    #[error("too many redirects (limit {max})")]
+    TooManyRedirects { max: u32 },
+
+    #[error("redirect location is not a valid URL: {0}")]
+    InvalidRedirect(String),
+
+    #[error("response body exceeds the {limit} byte limit")]
+    ResponseTooLarge { limit: u64 },
+
+    #[error("unsupported content encoding `{0}`")]
+    UnsupportedEncoding(String),
+
     #[error("request failed: {0}")]
     Request(#[from] hyper_util::client::legacy::Error),
 

@@ -25,7 +25,8 @@ pub use context::Context;
 pub use encoding::{base64_decode, base64_encode};
 pub use error::{CoreError, Result};
 pub use model::{
-    ApiKeyLocation, Auth, Body, Collection, Id, Method, RequestDef, Scripts, VarSet, VarValue,
+    ApiKeyLocation, Auth, Body, Collection, Id, Method, MultipartPart, MultipartValue, RequestDef,
+    Scripts, VarSet, VarValue,
 };
 pub use prepare::{
     compile_request, prepare_request, prepare_request_with_seed, CompiledRequest, PreparedRequest,

@@ -12,9 +12,9 @@ use thiserror::Error;
 
 /// The protocol version this build speaks.
 ///
-/// v0.3 (minor): `sendRequest.request` gained the optional `timeoutMs` deadline.
-/// See `PROTOCOL.md` §9.
-pub const PROTOCOL_VERSION: Version = Version::new(0, 3);
+/// v0.4 (minor): request bodies gained the `multipart` and `graphql` kinds, and a
+/// binary response may carry `bodyBase64`. See `PROTOCOL.md` §10.
+pub const PROTOCOL_VERSION: Version = Version::new(0, 4);
 
 /// A `major.minor` protocol version.
 ///
@@ -64,18 +64,18 @@ mod tests {
 
     #[test]
     fn matching_versions_negotiate_to_the_lower_minor() {
-        let local = Version::new(0, 3);
+        let local = PROTOCOL_VERSION;
         assert_eq!(
             negotiate(Version::new(0, 1), local).unwrap(),
             Version::new(0, 1)
         );
         assert_eq!(
-            negotiate(Version::new(0, 3), local).unwrap(),
-            Version::new(0, 3)
+            negotiate(Version::new(0, 4), local).unwrap(),
+            Version::new(0, 4)
         );
         assert_eq!(
             negotiate(Version::new(0, 9), local).unwrap(),
-            Version::new(0, 3)
+            Version::new(0, 4)
         );
     }
 

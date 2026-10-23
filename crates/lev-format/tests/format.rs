@@ -287,6 +287,73 @@ fn a_bytes_body_round_trips_as_base64() {
 }
 
 #[test]
+fn a_multipart_body_round_trips_with_its_parts() {
+    use lev_core::{Body, MultipartValue};
+
+    let format = Yaml;
+    let source = "id: up\nname: Up\nmethod: POST\nurl: /upload\nbody:\n  multipart:\n    - name: title\n      value: \"{{title}}\"\n    - name: file\n      file: fixtures/logo.png\n      filename: renamed.png\n      contentType: image/png\n";
+    let request = format.request_from_str(source).unwrap();
+
+    let Body::Multipart(parts) = &request.body else {
+        panic!("expected multipart, got {:?}", request.body);
+    };
+    assert_eq!(parts[0].name, "title");
+    assert_eq!(parts[0].value, MultipartValue::Text("{{title}}".into()));
+    assert_eq!(
+        parts[1].value,
+        MultipartValue::File {
+            path: lev_core::Template::parse("fixtures/logo.png").unwrap(),
+            filename: Some("renamed.png".to_string()),
+            content_type: Some("image/png".to_string()),
+        }
+    );
+
+    let rendered = format.request_to_string(&request).unwrap();
+    assert_eq!(
+        format.request_from_str(&rendered).unwrap().body,
+        request.body
+    );
+}
+
+#[test]
+fn a_multipart_part_takes_exactly_one_value_source() {
+    let format = Yaml;
+    let source = "id: up\nname: Up\nmethod: POST\nurl: /upload\nbody:\n  multipart:\n    - name: file\n      value: text\n      file: fixtures/logo.png\n";
+    let error = format.request_from_str(source).unwrap_err();
+    assert!(
+        matches!(error, lev_format::FormatError::InvalidBody(_)),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_graphql_body_round_trips_as_the_json_envelope() {
+    use lev_core::Body;
+
+    let format = Yaml;
+    let source = "id: q\nname: Q\nmethod: POST\nurl: /graphql\nbody:\n  graphql:\n    query: |\n      query Viewer { viewer { id } }\n    variables: '{\"id\":\"{{id}}\"}'\n    operationName: Viewer\n";
+    let request = format.request_from_str(source).unwrap();
+
+    let Body::Graphql {
+        query,
+        variables,
+        operation_name,
+    } = &request.body
+    else {
+        panic!("expected graphql, got {:?}", request.body);
+    };
+    assert_eq!(query, "query Viewer { viewer { id } }\n");
+    assert_eq!(variables.as_deref(), Some("{\"id\":\"{{id}}\"}"));
+    assert_eq!(operation_name.as_deref(), Some("Viewer"));
+
+    let rendered = format.request_to_string(&request).unwrap();
+    assert_eq!(
+        format.request_from_str(&rendered).unwrap().body,
+        request.body
+    );
+}
+
+#[test]
 fn a_file_body_survives_a_round_trip_unresolved() {
     // The loader resolves a `file` body to bytes; the *document* keeps the reference,
     // so rendering a parsed collection returns what the author wrote.
