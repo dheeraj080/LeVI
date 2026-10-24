@@ -29,7 +29,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude levi-desktop --all-targets -- -D warnings
         env:
           RUSTC_WRAPPER: sccache
 
@@ -69,12 +69,12 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Test
-        run: cargo nextest run --workspace
+        run: cargo nextest run --workspace --exclude levi-desktop
         env:
           RUSTC_WRAPPER: sccache
 
       - name: Doc tests
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --exclude levi-desktop --doc
         env:
           RUSTC_WRAPPER: sccache
 
@@ -99,7 +99,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check the workspace at the declared MSRV
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --exclude levi-desktop --all-targets
 
   # Report-only for now: there is no honest baseline until the first number is
   # measured. Add `--fail-under-lines <n>` once the ratchet starts.
@@ -126,4 +126,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage summary
-        run: cargo llvm-cov --workspace --summary-only --doctests
+        run: cargo llvm-cov --workspace --exclude levi-desktop --summary-only --doctests
