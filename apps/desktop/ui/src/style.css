@@ -1,0 +1,62 @@
+:root {
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  color: #0f0f0f;
+  background-color: #f6f6f6;
+}
+
+.container {
+  margin: 0;
+  padding-top: 10vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+
+header h1 {
+  font-size: 2em;
+  margin: 0.5em 0;
+}
+
+.request-bar {
+  display: flex;
+  gap: 0.5em;
+  justify-content: center;
+  padding: 1em;
+}
+
+.request-bar input {
+  width: 400px;
+  padding: 0.5em;
+}
+
+.body-editor {
+  display: flex;
+  justify-content: center;
+  padding: 1em;
+}
+
+.body-editor textarea {
+  width: 600px;
+  height: 100px;
+  padding: 0.5em;
+}
+
+.response {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1em;
+}
+
+.response pre {
+  width: 600px;
+  text-align: left;
+  background: #fff;
+  padding: 1em;
+  overflow-x: auto;
+  border: 1px solid #ccc;
+}
