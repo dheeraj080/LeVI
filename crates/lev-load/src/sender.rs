@@ -64,8 +64,6 @@ impl Sender for HttpSender {
         &'a self,
         request: PreparedRequest,
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
-        Box::pin(async move {
-            self.client.send(request).await.ok()
-        })
+        Box::pin(async move { self.client.send(request).await.ok() })
     }
 }
