@@ -62,7 +62,9 @@ async fn send_request(cmd: SendRequestCmd) -> Result<SendResponse, String> {
         Some("bearer") => {
             if let Some(data) = &cmd.auth_data {
                 if let Some(token) = data.get("token").and_then(|v| v.as_str()) {
-                    Some(Auth::Bearer(lev_core::Template::parse(token).map_err(|e| e.to_string())?))
+                    Some(Auth::Bearer(
+                        lev_core::Template::parse(token).map_err(|e| e.to_string())?,
+                    ))
                 } else {
                     None
                 }
@@ -146,7 +148,8 @@ async fn send_request(cmd: SendRequestCmd) -> Result<SendResponse, String> {
 
 #[tauri::command]
 async fn load_collection_cmd(path: String) -> Result<Collection, String> {
-    let collection = load_collection(&Yaml, std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+    let collection =
+        load_collection(&Yaml, std::path::Path::new(&path)).map_err(|e| e.to_string())?;
     Ok(collection)
 }
 

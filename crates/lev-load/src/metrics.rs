@@ -160,7 +160,10 @@ pub(crate) fn flush(
     recorder.record_requests(total.http_reqs, total.http_req_failed);
     recorder.record_iterations(total.iterations);
     if total.checks > 0 || total.checks_failed > 0 {
-        recorder.record_checks(total.checks.saturating_sub(total.checks_failed), total.checks_failed);
+        recorder.record_checks(
+            total.checks.saturating_sub(total.checks_failed),
+            total.checks_failed,
+        );
     }
     for _ in 0..total.script_errors {
         recorder.record_script_error();

@@ -17,7 +17,9 @@ use std::time::Duration;
 use lev_core::secrets::SecretStore;
 use lev_core::{Check, Context, VarSet, VarValue};
 use lev_engine::checks as engine_checks;
-use lev_script::{Limits, Phase, Sandbox, ScriptInput, ScriptOutcome, ScriptRequest, ScriptResponse};
+use lev_script::{
+    Limits, Phase, Sandbox, ScriptInput, ScriptOutcome, ScriptRequest, ScriptResponse,
+};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -169,7 +171,9 @@ async fn run_one_vu(
                 // Declarative assertions
                 let checks = engine_checks::evaluate(&step.request_def.assertions, resp);
                 record_checks(&metrics, &checks);
-            } else if !step.request_def.assertions.is_empty() || step.request_def.scripts.post_response.is_some() {
+            } else if !step.request_def.assertions.is_empty()
+                || step.request_def.scripts.post_response.is_some()
+            {
                 // No response means transport failure - counts as failed requests already; script/assertions can't run meaningfully
             }
 
