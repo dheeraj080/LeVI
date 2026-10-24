@@ -18,15 +18,27 @@ use lev_core::{
 use crate::error::LoadError;
 
 /// One step, with its request already compiled.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CompiledStep {
     /// The request id, kept for error messages and (later) per-step metrics.
     pub request_id: Id,
     /// The request, parsed once.
     pub request: CompiledRequest,
+    /// The original request definition (for scripts/assertions).
+    pub request_def: RequestDef,
     /// Pause after this step, before the next.
     pub think_time: Option<Duration>,
 }
+
+impl PartialEq for CompiledStep {
+    fn eq(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.request == other.request
+            && self.think_time == other.think_time
+    }
+}
+
+impl Eq for CompiledStep {}
 
 /// A scenario bound to its requests, ready to run.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +98,7 @@ impl CompiledScenario {
             steps.push(CompiledStep {
                 request_id: step.request.clone(),
                 request: compile_request(collection, request)?,
+                request_def: request.clone(),
                 think_time: step.think_time,
             });
         }

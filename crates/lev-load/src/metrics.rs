@@ -39,6 +39,9 @@ pub(crate) struct WorkerMetrics {
     http_reqs: AtomicU64,
     http_req_failed: AtomicU64,
     iterations: AtomicU64,
+    checks: AtomicU64,
+    checks_failed: AtomicU64,
+    script_errors: AtomicU64,
     latency: Mutex<Histogram<u64>>,
 }
 
@@ -48,6 +51,9 @@ impl WorkerMetrics {
             http_reqs: AtomicU64::new(0),
             http_req_failed: AtomicU64::new(0),
             iterations: AtomicU64::new(0),
+            checks: AtomicU64::new(0),
+            checks_failed: AtomicU64::new(0),
+            script_errors: AtomicU64::new(0),
             // The configuration is a compile-time constant; a failure here is a bug.
             latency: Mutex::new(new_histogram().expect("the latency histogram config is valid")),
         }
@@ -66,6 +72,17 @@ impl WorkerMetrics {
         self.iterations.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record check outcomes.
+    pub(crate) fn record_checks(&self, passed: u64, failed: u64) {
+        self.checks.fetch_add(passed + failed, Ordering::Relaxed);
+        self.checks_failed.fetch_add(failed, Ordering::Relaxed);
+    }
+
+    /// Record a script error.
+    pub(crate) fn record_script_error(&self) {
+        self.script_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record one request's latency, in microseconds.
     pub(crate) fn record_latency(&self, micros: u64) {
         if let Ok(mut histogram) = self.latency.lock() {
@@ -79,6 +96,9 @@ impl WorkerMetrics {
             http_reqs: self.http_reqs.swap(0, Ordering::Relaxed),
             http_req_failed: self.http_req_failed.swap(0, Ordering::Relaxed),
             iterations: self.iterations.swap(0, Ordering::Relaxed),
+            checks: self.checks.swap(0, Ordering::Relaxed),
+            checks_failed: self.checks_failed.swap(0, Ordering::Relaxed),
+            script_errors: self.script_errors.swap(0, Ordering::Relaxed),
         }
     }
 
@@ -105,6 +125,9 @@ pub(crate) struct Counters {
     pub(crate) http_reqs: u64,
     pub(crate) http_req_failed: u64,
     pub(crate) iterations: u64,
+    pub(crate) checks: u64,
+    pub(crate) checks_failed: u64,
+    pub(crate) script_errors: u64,
 }
 
 /// Drain every worker into the run-level histogram and recorder.
@@ -123,6 +146,9 @@ pub(crate) fn flush(
         total.http_reqs += delta.http_reqs;
         total.http_req_failed += delta.http_req_failed;
         total.iterations += delta.iterations;
+        total.checks += delta.checks;
+        total.checks_failed += delta.checks_failed;
+        total.script_errors += delta.script_errors;
 
         if let Some(delta) = worker.take_latency()? {
             run_histogram.add(&delta).map_err(|error| {
@@ -133,6 +159,12 @@ pub(crate) fn flush(
 
     recorder.record_requests(total.http_reqs, total.http_req_failed);
     recorder.record_iterations(total.iterations);
+    if total.checks > 0 || total.checks_failed > 0 {
+        recorder.record_checks(total.checks.saturating_sub(total.checks_failed), total.checks_failed);
+    }
+    for _ in 0..total.script_errors {
+        recorder.record_script_error();
+    }
     recorder.set_vus(active_vus);
     recorder.set_latency(latency_summary(run_histogram));
     Ok(())

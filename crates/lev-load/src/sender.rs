@@ -12,14 +12,14 @@ use std::future::Future;
 use std::pin::Pin;
 
 use lev_core::PreparedRequest;
-use lev_http::{ClientConfig, HttpClient};
+use lev_http::{ClientConfig, HttpClient, Response};
 
 use crate::error::LoadError;
 
-/// The outcome of one send: the response status, or `None` on a transport failure
+/// The outcome of one send: the full response or `None` on a transport failure
 /// (DNS, connect, TLS, reset, bad URL). The executor measures latency itself, around
 /// the call, so failures are timed the same way successes are.
-pub type SendResult = Option<u16>;
+pub type SendResult = Option<Response>;
 
 /// Sends a prepared request.
 pub trait Sender: Send + Sync + 'static {
@@ -29,7 +29,7 @@ pub trait Sender: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 }
 
-/// The real sender: the pooled hyper client, discarding response bodies.
+/// The real sender: the pooled hyper client.
 pub struct HttpSender {
     client: HttpClient,
 }
@@ -65,8 +65,8 @@ impl Sender for HttpSender {
         request: PreparedRequest,
     ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
         Box::pin(async move {
-            match self.client.send_discarding(request).await {
-                Ok(response) => Some(response.status),
+            match self.client.send(request).await {
+                Ok(response) => Some(response),
                 Err(_) => None,
             }
         })

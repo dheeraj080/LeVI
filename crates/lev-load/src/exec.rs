@@ -10,11 +10,14 @@
 //! the token goes off between steps, so the request in flight is allowed to finish and
 //! the VU leaves at the next safe point rather than being killed mid-send.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use lev_core::secrets::SecretStore;
-use lev_core::{Context, VarSet};
+use lev_core::{Check, Context, VarSet, VarValue};
+use lev_engine::checks as engine_checks;
+use lev_script::{Limits, Phase, Sandbox, ScriptInput, ScriptOutcome, ScriptRequest, ScriptResponse};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +47,7 @@ pub(crate) async fn run_vus(
     deadline: Instant,
     seed: u64,
 ) {
+    let sandbox = Arc::new(Sandbox::new(Limits::default()).expect("script sandbox"));
     let mut tasks = Vec::with_capacity(count as usize);
     for offset in 0..count {
         let index = base_index + offset;
@@ -58,6 +62,7 @@ pub(crate) async fn run_vus(
             Arc::clone(&clock),
             Arc::clone(&metrics),
             cancel.clone(),
+            Arc::clone(&sandbox),
         )));
     }
     for task in tasks {
@@ -79,12 +84,14 @@ async fn run_one_vu(
     clock: Arc<dyn Clock>,
     metrics: Arc<WorkerMetrics>,
     cancel: CancellationToken,
+    sandbox: Arc<Sandbox>,
 ) {
     // Each VU gets its own seed, so two VUs never send the same `{{$uuid}}` stream.
     let seed = seed.wrapping_add(u64::from(index));
     // One context for the VU's whole life: the seeded RNG keeps advancing, so dynamic
     // functions differ every iteration (a fresh context per iteration would not).
-    let mut ctx = Context::with_seed(vars, secrets.as_ref(), seed);
+    let mut ctx = Context::with_seed(vars.clone(), secrets.as_ref(), seed);
+    let mut scope = script_scope(&vars, secrets.as_ref());
 
     // The label is what makes a stop *graceful*: leaving between steps (rather than
     // mid-send) means the request already in flight still counts, and an iteration that
@@ -95,7 +102,7 @@ async fn run_one_vu(
                 break 'vu;
             }
 
-            let prepared = match step.request.prepare(&mut ctx) {
+            let mut prepared = match step.request.prepare(&mut ctx) {
                 Ok(prepared) => prepared,
                 Err(_) => {
                     // `validate` rules out a bad request up front, so a failure here is
@@ -105,12 +112,66 @@ async fn run_one_vu(
                 }
             };
 
+            // Pre-request script
+            if let Some(script) = step.request_def.scripts.pre_request.as_deref() {
+                let input = ScriptInput {
+                    phase: Phase::PreRequest,
+                    request: ScriptRequest::from(&prepared),
+                    response: None,
+                    vars: scope.clone(),
+                    seed,
+                };
+                match run_script(Arc::clone(&sandbox), script.to_string(), input).await {
+                    Ok(outcome) => {
+                        prepared = outcome.request.into_prepared();
+                        scope = outcome.vars;
+                        record_checks(&metrics, &outcome.checks);
+                    }
+                    Err(_) => {
+                        metrics.record_script_error();
+                    }
+                }
+            }
+
             let started = clock.now();
-            let status = sender.send(prepared).await;
+            let response = sender.send(prepared.clone()).await;
             let latency = clock.now().saturating_duration_since(started);
 
-            metrics.record_request(!status.is_some_and(is_success));
+            let http_ok = response.as_ref().is_some_and(|r| is_success(r.status));
+            metrics.record_request(!http_ok);
             metrics.record_latency(u64::try_from(latency.as_micros()).unwrap_or(u64::MAX));
+
+            if let Some(resp) = response.as_ref() {
+                // Post-response script
+                if let Some(script) = step.request_def.scripts.post_response.as_deref() {
+                    let input = ScriptInput {
+                        phase: Phase::PostResponse,
+                        request: ScriptRequest::from(&prepared),
+                        response: Some(ScriptResponse {
+                            status: resp.status,
+                            headers: resp.headers.clone(),
+                            body: String::from_utf8_lossy(&resp.body).into_owned(),
+                            time_ms: resp.timings.total.as_secs_f64() * 1_000.0,
+                        }),
+                        vars: scope.clone(),
+                        seed,
+                    };
+                    match run_script(Arc::clone(&sandbox), script.to_string(), input).await {
+                        Ok(outcome) => {
+                            scope = outcome.vars;
+                            record_checks(&metrics, &outcome.checks);
+                        }
+                        Err(_) => {
+                            metrics.record_script_error();
+                        }
+                    }
+                }
+                // Declarative assertions
+                let checks = engine_checks::evaluate(&step.request_def.assertions, resp);
+                record_checks(&metrics, &checks);
+            } else if !step.request_def.assertions.is_empty() || step.request_def.scripts.post_response.is_some() {
+                // No response means transport failure - counts as failed requests already; script/assertions can't run meaningfully
+            }
 
             if let Some(think_time) = step.think_time {
                 // Never sleep past the deadline. Without the clamp, the trailing think
@@ -133,6 +194,49 @@ async fn run_one_vu(
 /// k6's `http_req_failed` rule: 2xx and 3xx are successes.
 fn is_success(status: u16) -> bool {
     (200..400).contains(&status)
+}
+
+fn script_scope(vars: &VarSet, secrets: &dyn SecretStore) -> BTreeMap<String, String> {
+    let mut scope = BTreeMap::new();
+    for (name, value) in &vars.entries {
+        let text = match value {
+            VarValue::Plain(text) => text.clone(),
+            VarValue::Secret(secret_name) => {
+                if let Ok(secret) = secrets.resolve(secret_name) {
+                    secret.expose().to_string()
+                } else {
+                    String::new()
+                }
+            }
+        };
+        scope.insert(name.clone(), text);
+    }
+    scope
+}
+
+async fn run_script(
+    sandbox: Arc<Sandbox>,
+    source: String,
+    input: ScriptInput,
+) -> Result<ScriptOutcome, lev_script::ScriptError> {
+    tokio::task::spawn_blocking(move || sandbox.run(&source, input))
+        .await
+        .map_err(|_| lev_script::ScriptError::Runtime("script task failed".to_string()))?
+}
+
+fn record_checks(metrics: &WorkerMetrics, checks: &[Check]) {
+    let mut passed = 0u64;
+    let mut failed = 0u64;
+    for check in checks {
+        if check.passed {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+    }
+    if passed + failed > 0 {
+        metrics.record_checks(passed, failed);
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +265,23 @@ mod tests {
             &'a self,
             _request: lev_core::PreparedRequest,
         ) -> Pin<Box<dyn Future<Output = SendResult> + Send + 'a>> {
-            Box::pin(async { Some(200) })
+            use bytes::Bytes;
+            use lev_http::Timings;
+            use std::time::Duration;
+            Box::pin(async {
+                Some(lev_http::Response {
+                    status: 200,
+                    version: "HTTP/1.1".to_string(),
+                    headers: vec![],
+                    body: Bytes::new(),
+                    attempts: 1,
+                    redirects: 0,
+                    timings: Timings {
+                        total: Duration::from_millis(1),
+                        ..Timings::default()
+                    },
+                })
+            })
         }
     }
 

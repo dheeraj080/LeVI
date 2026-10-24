@@ -3,3 +3,4 @@ internal/
 
 # insta snapshot review artifacts
 *.snap.new
+node_modules/

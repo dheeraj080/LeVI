@@ -1201,10 +1201,13 @@ dependencies = [
 name = "lev-load"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "hdrhistogram",
  "lev-core",
+ "lev-engine",
  "lev-http",
  "lev-metrics",
+ "lev-script",
  "serde_json",
  "thiserror",
  "tokio",
