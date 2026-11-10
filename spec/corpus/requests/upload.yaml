@@ -1,9 +1,0 @@
-id: upload
-name: Upload a fixture
-method: POST
-url: /uploads
-headers:
-  - name: Accept
-    value: application/json
-body:
-  file: fixtures/payload.txt

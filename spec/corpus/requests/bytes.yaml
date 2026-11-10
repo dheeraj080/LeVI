@@ -1,8 +1,0 @@
-id: inline-bytes
-name: Upload inline bytes
-method: POST
-url: /uploads
-body:
-  bytes:
-    contentType: image/png
-    base64: iVBORw0KGgo=

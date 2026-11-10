@@ -1,7 +1,0 @@
-id: get-root
-name: GET /
-method: GET
-url: /
-headers:
-  - name: Accept
-    value: application/json

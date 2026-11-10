@@ -1,1 +1,0 @@
-{"sku":"corpus-fixture","note":"a file body is read relative to the collection"}
